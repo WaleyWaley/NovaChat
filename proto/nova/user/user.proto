@@ -1,0 +1,211 @@
+syntax = "proto3";
+
+package nova.user;
+
+import "nova/common/common.proto";
+
+// =============================================================================
+// NovaChat — UserService RPC 定义
+// 负责: 注册、登录、Token 管理、用户资料 CRUD、联系人搜索
+// =============================================================================
+
+// ============================= Register ======================================
+
+message RegisterReq {
+    string username   = 1;   // @username, 全局唯一, 3-32 字符
+    string password   = 2;   // 明文密码 (网关侧已做 TLS 加密, 服务端 bcrypt 哈希后丢弃)
+    string first_name = 3;   // 必填
+    string last_name  = 4;   // 选填
+    string phone      = 5;   // 选填, Phase 2 用于找回密码
+    string invite_hash = 6;  // 邀请链接 hash (可选)
+}
+
+message RegisterResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    int64                 user_id       = 3;   // 注册成功返回新用户 ID
+    string                access_token  = 4;   // 注册即登录, 直接返回 Token
+    string                refresh_token = 5;
+    int64                 expires_at    = 6;   // access_token 过期时间 (unix ms)
+    nova.common.UserProfile user        = 7;   // 完整用户资料
+}
+
+// ============================= Login =========================================
+
+message LoginReq {
+    string username    = 1;   // 用户名登录
+    string password    = 2;
+    string device_name = 3;   // 设备标识 (如 "iPhone 15 Pro")
+    string device_type = 4;   // android / ios / desktop / web
+}
+
+message LoginResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    string                access_token  = 3;
+    string                refresh_token = 4;
+    int64                 expires_at    = 5;
+    nova.common.UserProfile user        = 6;
+}
+
+// ============================= Token 刷新 ====================================
+
+message RefreshTokenReq {
+    string refresh_token = 1;
+}
+
+message RefreshTokenResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    string                access_token  = 3;
+    string                refresh_token = 4;   // Token 轮转: 旧 refresh_token 立即失效
+    int64                 expires_at    = 5;
+}
+
+// ============================= Logout ========================================
+
+message LogoutReq {
+    int64 user_id = 1;
+    // 网关从 JWT 中提取 user_id 并注入, 此处仅作校验
+}
+
+message LogoutResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+}
+
+// ============================= 获取单个用户资料 ===============================
+
+message GetUserProfileReq {
+    oneof identifier {
+        int64  user_id  = 1;
+        string username = 2;   // @username
+    }
+}
+
+message GetUserProfileResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    nova.common.UserProfile user        = 3;
+}
+
+// ============================= 批量获取用户资料 ================================
+
+message GetUsersReq {
+    repeated int64 user_ids = 1;   // 批量查询 (max 100)
+}
+
+message GetUsersResp {
+    nova.common.ErrorCode error_code       = 1;
+    string                error_message    = 2;
+    repeated nova.common.UserProfile users = 3;   // 顺序与 user_ids 对应, 不存在的条目为 default instance
+}
+
+// ============================= 更新个人资料 ====================================
+
+message UpdateProfileReq {
+    int64  user_id     = 1;
+    string first_name  = 2;   // 可选, 空字符串表示不修改
+    string last_name   = 3;
+    string bio         = 4;
+    string avatar_photo_id = 5;
+    // username 不允许随意修改 (Telegram 限制每 15-30 天改一次), 单独走 ChangeUsername
+}
+
+message UpdateProfileResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    nova.common.UserProfile user        = 3;   // 更新后的完整资料
+}
+
+// ============================= 修改用户名 =====================================
+
+message ChangeUsernameReq {
+    int64  user_id       = 1;
+    string new_username  = 2;
+}
+
+message ChangeUsernameResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    string                username      = 3;   // 确认后的用户名
+}
+
+// ============================= 检查用户名可用性 ================================
+
+message CheckUsernameReq {
+    string username = 1;
+}
+
+message CheckUsernameResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    bool                  is_available  = 3;
+}
+
+// ============================= 搜索用户 =======================================
+
+message SearchUsersReq {
+    string query   = 1;   // 搜索关键词 (username 或 first_name 前缀匹配)
+    int32  limit   = 2;   // max 50
+    int64  offset_id = 3;  // 分页: 返回 user_id < offset_id 的结果
+}
+
+message SearchUsersResp {
+    nova.common.ErrorCode error_code       = 1;
+    string                error_message    = 2;
+    repeated nova.common.UserProfile users = 3;
+    bool                  has_more         = 4;
+}
+
+// ============================= 修改密码 =======================================
+
+message ChangePasswordReq {
+    int64  user_id         = 1;
+    string old_password    = 2;
+    string new_password    = 3;
+}
+
+message ChangePasswordResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+}
+
+// ============================= 删除账户 =======================================
+
+message DeleteAccountReq {
+    int64  user_id  = 1;
+    string password = 2;   // 二次确认
+    string reason   = 3;   // 选填: 注销原因
+}
+
+message DeleteAccountResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+}
+
+// ============================= Service 定义 ===================================
+
+service UserService {
+    // 认证相关
+    rpc Register        (RegisterReq)         returns (RegisterResp);
+    rpc Login           (LoginReq)            returns (LoginResp);
+    rpc RefreshToken    (RefreshTokenReq)     returns (RefreshTokenResp);
+    rpc Logout          (LogoutReq)           returns (LogoutResp);
+
+    // 资料查询
+    rpc GetUserProfile  (GetUserProfileReq)   returns (GetUserProfileResp);
+    rpc GetUsers        (GetUsersReq)         returns (GetUsersResp);
+
+    // 资料修改
+    rpc UpdateProfile   (UpdateProfileReq)    returns (UpdateProfileResp);
+    rpc ChangeUsername   (ChangeUsernameReq)   returns (ChangeUsernameResp);
+    rpc CheckUsername    (CheckUsernameReq)    returns (CheckUsernameResp);
+    rpc ChangePassword  (ChangePasswordReq)   returns (ChangePasswordResp);
+
+    // 搜索
+    rpc SearchUsers     (SearchUsersReq)      returns (SearchUsersResp);
+
+    // 账户管理
+    rpc DeleteAccount   (DeleteAccountReq)     returns (DeleteAccountResp);
+}

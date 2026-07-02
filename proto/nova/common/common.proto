@@ -1,0 +1,412 @@
+syntax = "proto3";
+
+package nova.common;
+
+// =============================================================================
+// NovaChat — Common Protocol Definitions
+// 设计参考: Telegram MTProto 的类型体系与抽象层次
+// =============================================================================
+
+// ============================= Error Codes ==================================
+// Telegram 风格: 每个错误场景都有精确的错误码, 客户端据此做精细化处理
+enum ErrorCode {
+    OK = 0;
+
+    // --- Auth (1000–1099) ---
+    AUTH_KEY_INVALID     = 1001;
+    AUTH_KEY_EXPIRED     = 1002;
+    SESSION_EXPIRED      = 1003;
+    TOKEN_INVALID        = 1004;
+    PHONE_INVALID        = 1005;
+    PASSWORD_INVALID     = 1006;
+    CODE_INVALID         = 1007;
+    CODE_EXPIRED         = 1008;
+
+    // --- User (1100–1199) ---
+    USER_NOT_FOUND       = 1101;
+    USER_ALREADY_EXISTS  = 1102;
+    USERNAME_OCCUPIED    = 1103;
+    USERNAME_INVALID     = 1104;
+    USERNAME_NOT_MODIFIED = 1105;
+    USER_DEACTIVATED     = 1106;
+    FIRSTNAME_INVALID    = 1107;
+
+    // --- Peer / Chat (1200–1299) ---
+    PEER_NOT_FOUND         = 1201;
+    CHAT_NOT_FOUND         = 1202;
+    CHAT_WRITE_FORBIDDEN   = 1203;
+    CHAT_NOT_MEMBER        = 1204;
+    CHAT_ALREADY_MEMBER    = 1205;
+    CHAT_TOO_MANY_MEMBERS  = 1206;
+    CHANNEL_PRIVATE        = 1207;
+
+    // --- Message (1300–1399) ---
+    MESSAGE_TOO_LONG     = 1301;
+    MESSAGE_EMPTY        = 1302;
+    MESSAGE_ID_INVALID   = 1303;
+    MESSAGE_NOT_MODIFIED = 1304;
+    MESSAGE_DELETE_FORBIDDEN = 1305;
+    REPLY_MSG_NOT_FOUND  = 1306;
+    PIN_LIMIT_EXCEEDED   = 1307;
+
+    // --- Media (1400–1499) ---
+    FILE_TOO_LARGE       = 1401;
+    FILE_TYPE_INVALID    = 1402;
+    FILE_UPLOAD_FAILED   = 1403;
+    PHOTO_INVALID        = 1404;
+
+    // --- Rate Limiting (1500–1599) ---
+    FLOOD_WAIT           = 1501;
+    TOO_MANY_REQUESTS    = 1502;
+    SLOW_MODE_WAIT       = 1503;
+
+    // --- Internal (5000–5099) ---
+    INTERNAL_ERROR       = 5001;
+    SERVICE_UNAVAILABLE  = 5002;
+    DATABASE_ERROR       = 5003;
+    REDIS_ERROR          = 5004;
+}
+
+// ============================= Peer Abstraction ==============================
+// Telegram 核心设计: Peer 统一抽象用户、群组、频道三大对话类型
+// 客户端和服务端都基于 Peer 进行路由，而非区分 chat_id / user_id
+
+enum PeerType {
+    PEER_TYPE_UNKNOWN = 0;
+    PEER_TYPE_USER    = 1;   // 单聊对话
+    PEER_TYPE_CHAT    = 2;   // 群组对话
+    PEER_TYPE_CHANNEL = 3;   // 频道 (Phase 3+)
+}
+
+message Peer {
+    PeerType type = 1;
+    int64    id   = 2;       // user_id / chat_id / channel_id
+    int64    access_hash = 3; // Telegram 风格: 防止 ID 被枚举遍历
+}
+
+// ============================= User =========================================
+
+enum UserStatus {
+    USER_STATUS_OFFLINE    = 0;
+    USER_STATUS_ONLINE     = 1;
+    USER_STATUS_RECENTLY   = 2;  // 最近在线 (1天–1周内)
+    USER_STATUS_LAST_WEEK  = 3;
+    USER_STATUS_LAST_MONTH = 4;
+    USER_STATUS_LONG_AGO   = 5;  // 超过一个月
+}
+
+message UserProfile {
+    int64  user_id    = 1;
+    string username   = 2;   // @username, 全局唯一, 可用于搜索
+    string first_name = 3;
+    string last_name  = 4;
+    string bio        = 5;
+    string avatar_photo_id = 6;  // 头像文件引用
+    UserStatus status = 7;
+    int64  last_seen_at = 8;     // unix timestamp ms
+    bool   is_verified  = 9;
+    string phone        = 10;    // 仅本用户可见
+    int64  created_at   = 11;
+    int64  updated_at   = 12;
+}
+
+// ============================= Chat (群组) ==================================
+
+enum ChatType {
+    CHAT_TYPE_BASIC_GROUP = 0;   // 基础群 (最多 200 人, 消息不保留历史)
+    CHAT_TYPE_SUPERGROUP  = 1;   // 超级群 (最多 20 万人, 新成员可看历史)
+    CHAT_TYPE_CHANNEL     = 2;   // 频道 (Phase 3+)
+}
+
+enum ChatMemberRole {
+    CHAT_MEMBER_OWNER     = 0;
+    CHAT_MEMBER_ADMIN     = 1;
+    CHAT_MEMBER_MODERATOR = 2;
+    CHAT_MEMBER_NORMAL    = 3;
+    CHAT_MEMBER_RESTRICTED = 4;  // 受限成员 (禁言等)
+    CHAT_MEMBER_BANNED    = 5;
+}
+
+message ChatInfo {
+    int64  chat_id       = 1;
+    ChatType type        = 2;
+    string title         = 3;
+    string avatar_photo_id = 4;
+    int32  member_count  = 5;
+    int64  created_at    = 6;
+    int64  updated_at    = 7;
+    bool   is_public     = 8;
+    string invite_hash   = 9;    // 邀请链接 hash
+    string description   = 10;
+    bool   slow_mode_enabled = 11;
+    int32  slow_mode_seconds = 12; // 慢速模式冷却时间
+}
+
+message ChatMember {
+    int64          chat_id = 1;
+    UserProfile    user    = 2;
+    ChatMemberRole role    = 3;
+    int64          joined_at = 4;
+}
+
+// ============================= Message ======================================
+
+enum MessageType {
+    MESSAGE_TYPE_TEXT     = 0;
+    MESSAGE_TYPE_PHOTO    = 1;
+    MESSAGE_TYPE_VIDEO    = 2;
+    MESSAGE_TYPE_AUDIO    = 3;
+    MESSAGE_TYPE_VOICE    = 4;   // 语音消息
+    MESSAGE_TYPE_DOCUMENT = 5;
+    MESSAGE_TYPE_STICKER  = 6;
+    MESSAGE_TYPE_LOCATION = 7;
+    MESSAGE_TYPE_CONTACT  = 8;
+    MESSAGE_TYPE_POLL     = 9;
+    MESSAGE_TYPE_SERVICE  = 10;  // 系统消息 (入群/离群/置顶/改名等)
+    MESSAGE_TYPE_ANIMATION = 11; // GIF
+}
+
+enum MessageStatus {
+    MESSAGE_STATUS_UNSENT    = 0;  // 客户端侧: 发送中
+    MESSAGE_STATUS_SENT      = 1;  // 服务端已存储
+    MESSAGE_STATUS_DELIVERED = 2;  // 已送达对端
+    MESSAGE_STATUS_READ      = 3;  // 对端已读
+    MESSAGE_STATUS_FAILED    = 4;
+}
+
+// ============================= Rich Text Entities ============================
+// Telegram 风格的消息实体: 文本中嵌入格式标记, 通过 offset + length 定位
+
+enum MessageEntityType {
+    ENTITY_BOLD          = 0;
+    ENTITY_ITALIC        = 1;
+    ENTITY_UNDERLINE     = 2;
+    ENTITY_STRIKETHROUGH = 3;
+    ENTITY_SPOILER       = 4;
+    ENTITY_CODE          = 5;   // 行内代码
+    ENTITY_PRE           = 6;   // 代码块
+    ENTITY_BLOCKQUOTE    = 7;
+    ENTITY_MENTION       = 8;   // @username
+    ENTITY_MENTION_NAME  = 9;   // @用户 (携带 user_id)
+    ENTITY_HASHTAG       = 10;
+    ENTITY_URL           = 11;
+    ENTITY_EMAIL         = 12;
+    ENTITY_PHONE         = 13;
+    ENTITY_CASHTAG       = 14;
+    ENTITY_BOT_COMMAND   = 15;
+    ENTITY_CUSTOM_EMOJI  = 16;
+}
+
+message MessageEntity {
+    MessageEntityType type   = 1;
+    int32  offset            = 2;   // UTF-16 code unit 偏移
+    int32  length            = 3;   // UTF-16 code unit 长度
+    string url               = 4;   // ENTITY_URL 时使用
+    int64  mentioned_user_id = 5;   // ENTITY_MENTION_NAME 时使用
+    string language          = 6;   // ENTITY_PRE 时标记语言
+    int64  custom_emoji_id   = 7;   // ENTITY_CUSTOM_EMOJI 时使用
+}
+
+// ============================= Media / File =================================
+
+message FileReference {
+    int64  file_id      = 1;
+    int64  access_hash  = 2;
+    string mime_type    = 3;
+    int32  size         = 4;   // 文件大小 (bytes)
+    // 图片/视频专用
+    int32  width        = 5;
+    int32  height       = 6;
+    // 音频/视频/语音专用
+    int32  duration     = 7;   // 时长 (秒)
+    // 通用
+    string file_name    = 8;   // 原始文件名
+    bytes  thumbnail    = 9;   // 缩略图 (少量数据, 内联; 大缩略图另走文件服务)
+    string waveform     = 10;  // 语音消息波形数据 (base64)
+    string performer    = 11;  // 音频: 表演者
+    string title        = 12;  // 音频: 曲目标题
+}
+
+// ============================= Location =====================================
+
+message GeoPoint {
+    double latitude  = 1;
+    double longitude = 2;
+    double horizontal_accuracy = 3;  // 精度半径 (米)
+}
+
+// ============================= Poll =========================================
+
+message PollOption {
+    string text     = 1;
+    int32  vote_count = 2;
+    bool   is_chosen  = 3;   // 当前用户是否选了此项
+}
+
+message Poll {
+    int64  poll_id           = 1;
+    string question           = 2;
+    repeated PollOption options = 3;
+    bool   is_anonymous       = 4;
+    bool   is_closed          = 5;
+    bool   allow_multiple     = 6;  // 是否允许多选
+    int32  total_voters       = 7;
+}
+
+// ============================= Message Envelope ==============================
+
+message Message {
+    int64  message_id        = 1;
+    Peer   from_peer         = 2;   // 发送者
+    Peer   to_peer           = 3;   // 接收者 (用户或群组)
+    MessageType type         = 4;
+    MessageStatus status     = 5;
+    string text              = 6;   // 文本消息内容
+    repeated MessageEntity entities = 7;  // 富文本格式
+    FileReference media      = 8;   // 媒体附件 (可选)
+    int64  reply_to_msg_id   = 9;   // 回复引用
+    int64  fwd_from_msg_id   = 10;  // 转发来源
+    Peer   fwd_from_peer     = 11;  // 转发来源的对话
+    int64  created_at        = 12;  // unix timestamp ms
+    int64  edited_at         = 13;  // 编辑时间 (0 = 未编辑)
+    bool   is_pinned         = 14;
+    bool   is_silent         = 15;  // 静默消息 (不触发通知)
+    bool   is_outgoing       = 16;  // 客户端侧: 是否是本人发出的
+    string service_action    = 17;  // 服务消息的动作类型 (MESSAGE_TYPE_SERVICE 时)
+    int32  ttl_seconds       = 18;  // 消息自毁计时 (0 = 不自毁)
+    Poll   poll              = 19;  // 投票 (MESSAGE_TYPE_POLL 时)
+    GeoPoint location        = 20;  // 位置 (MESSAGE_TYPE_LOCATION 时)
+    string contact_name      = 21;  // 联系人名称 (MESSAGE_TYPE_CONTACT 时)
+    string contact_phone     = 22;  // 联系人电话
+    int64  views_count       = 23;  // 频道消息查看数
+}
+
+// ============================= Updates / Events ==============================
+// Telegram 风格: 服务端下发的所有实时事件统一为 Update
+// 客户端通过一个 WebSocket 通道接收所有类型的 Update
+
+enum UpdateType {
+    UPDATE_NEW_MESSAGE         = 0;
+    UPDATE_MESSAGE_EDITED      = 1;
+    UPDATE_MESSAGE_DELETED     = 2;
+    UPDATE_MESSAGE_READ        = 3;
+    UPDATE_USER_STATUS         = 4;   // 好友上线/离线
+    UPDATE_USER_TYPING         = 5;   // 对方正在输入
+    UPDATE_USER_PROFILE        = 6;   // 好友资料变更
+    UPDATE_CHAT_MEMBER_JOINED  = 7;
+    UPDATE_CHAT_MEMBER_LEFT    = 8;
+    UPDATE_CHAT_TITLE_CHANGED  = 9;
+    UPDATE_CHAT_PHOTO_CHANGED  = 10;
+    UPDATE_DELETE_MESSAGES     = 11;  // 批量删除
+    UPDATE_PINNED_MESSAGE      = 12;
+    UPDATE_NEW_POLL_RESULT     = 13;
+}
+
+message Update {
+    UpdateType type = 1;
+    oneof payload {
+        Message          new_message      = 10;
+        Message          edited_message   = 11;
+        DeleteMessages   delete_messages  = 12;
+        ReadReceipt      read_receipt     = 13;
+        UserStatusUpdate user_status      = 14;
+        TypingIndicator  typing           = 15;
+        UserProfile      user_profile     = 16;
+        ChatMemberUpdate member_update    = 17;
+        ChatInfo         chat_info        = 18;
+        Message          pinned_message   = 19;
+        Poll             poll_result      = 20;
+    }
+}
+
+message DeleteMessages {
+    Peer peer = 1;
+    repeated int64 message_ids = 2;
+}
+
+message ReadReceipt {
+    Peer peer      = 1;
+    int64 max_read_msg_id = 2;
+    int64 read_at  = 3;
+}
+
+message UserStatusUpdate {
+    int64      user_id = 1;
+    UserStatus status  = 2;
+}
+
+message TypingIndicator {
+    Peer from_peer = 1;
+    Peer to_peer   = 2;
+    bool is_typing = 3;   // true = 开始输入, false = 停止输入
+    int64 action_at = 4;  // 操作时间
+}
+
+message ChatMemberUpdate {
+    int64  chat_id = 1;
+    UserProfile user = 2;
+    UpdateType type = 3;  // JOINED 或 LEFT
+}
+
+// ============================= Pagination ====================================
+// Telegram 风格分页: 基于 ID 和时间偏移的向下翻页
+
+message PageRequest {
+    int32 limit          = 1;   // 单页条数 (max 100)
+    int64 offset_id      = 2;   // 返回 id < offset_id 的消息 (向下翻页)
+    int64 offset_date    = 3;   // 或按时间偏移
+    bool  direction_older = 4;  // true = 更早的消息, false = 更新的消息
+}
+
+message PageResponse {
+    int32 count     = 1;
+    bool  has_more  = 2;
+    int64 next_offset_id = 3;   // 下次请求的 offset_id
+}
+
+// ============================= Sync State ====================================
+// Telegram PTS / QTS 模型: 客户端维护本地状态号, 增量拉取变更
+
+message SyncState {
+    int64 pts  = 1;   // 更新序列号 (monotonic)
+    int64 date = 2;   // 最近更新的 unix timestamp ms
+    int32 seq  = 3;   // 日内消息序号
+}
+
+// ============================= Common Wrappers ===============================
+
+// 通用请求元数据 (通过 HTTP Header 或嵌套字段携带)
+message RequestMeta {
+    int64  user_id       = 1;
+    string auth_key_id   = 2;
+    string client_ip     = 3;
+    string client_device = 4;   // android / ios / desktop / web
+    string client_version = 5;
+    string lang_code     = 6;   // zh-CN / en-US
+}
+
+// 通用响应包装 (支持字节级响应体复用)
+message Response {
+    ErrorCode error_code    = 1;
+    string    error_message = 2;
+    bytes     data          = 3;  // 内层序列化 (按具体服务而定)
+}
+
+// ============================= Service Actions ===============================
+// MESSAGE_TYPE_SERVICE 时的 action 类型
+
+enum ServiceAction {
+    SERVICE_GROUP_CREATED        = 0;
+    SERVICE_MEMBER_JOINED        = 1;
+    SERVICE_MEMBER_LEFT          = 2;
+    SERVICE_MEMBER_KICKED        = 3;
+    SERVICE_MEMBER_INVITED       = 4;
+    SERVICE_TITLE_CHANGED        = 5;
+    SERVICE_PHOTO_CHANGED        = 6;
+    SERVICE_PHOTO_REMOVED        = 7;
+    SERVICE_PINNED_MESSAGE       = 8;
+    SERVICE_CHAT_CREATED_CHANNEL = 9;
+    SERVICE_VIDEO_CHAT_STARTED   = 10;
+    SERVICE_VIDEO_CHAT_ENDED     = 11;
+    SERVICE_CUSTOM               = 99;  // 自定义 (text 字段携带 JSON)
+}

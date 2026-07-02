@@ -1,0 +1,32 @@
+# =============================================================================
+# NovaChat User Service — 配置文件
+#
+# 使用: ./nova_user_service --flagfile=conf/user_service.flags
+# 命令行 --key=value 覆盖此文件
+# =============================================================================
+
+# --- 服务器 ---
+--port=8001
+--listen_addr=0.0.0.0
+--idle_timeout_sec=-1
+
+# --- Snowflake Worker ID (集群中每个实例唯一, 0-1023) ---
+--worker_id=1
+
+# --- MySQL (Phase 2 启用) ---
+# --mysql_addr=127.0.0.1
+# --mysql_port=3306
+# --mysql_user=root
+# --mysql_passwd=
+# --mysql_db=novachat
+
+# --- Redis (Phase 2 启用) ---
+# --redis_addr=127.0.0.1
+# --redis_port=6379
+# --redis_passwd=
+
+# --- 日志 ---
+--log_dir=./logs
+--minloglevel=0
+--v=0
+--logbufsecs=0

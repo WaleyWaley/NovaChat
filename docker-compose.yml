@@ -1,0 +1,77 @@
+# =============================================================================
+# NovaChat — 开发环境 Docker Compose 编排
+#
+# 启动:
+#   docker-compose up -d            # 后台启动全部服务
+#   docker-compose up --build       # 重建镜像并启动
+#   docker-compose logs -f          # 查看日志
+#   docker-compose down             # 停止并清理
+#
+# 服务:
+#   user-service    C++ bRPC 用户服务 (port 8001)
+#   gateway         TS Fastify 网关   (port 3000)
+#
+# Phase 2 将加入: message-service, redis, mysql
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ===== C++ User Service =====
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: novachat-user-service:latest
+    container_name: novachat-user-service
+    ports:
+      - "8001:8001"
+    command:
+      - "--flagfile=conf/user_service.flags"
+      - "--port=8001"
+      - "--listen_addr=0.0.0.0"
+      - "--worker_id=1"
+    restart: unless-stopped
+    networks:
+      - novachat-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ===== TS Gateway =====
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: novachat-gateway:latest
+    container_name: novachat-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - GATEWAY_PORT=3000
+      - GATEWAY_HOST=0.0.0.0
+      - USER_SERVICE_URL=http://user-service:8001
+      - MESSAGE_SERVICE_URL=http://message-service:8002
+      - JWT_SECRET=novachat-docker-dev-secret
+      - JWT_EXPIRES_IN=24h
+      - WORKER_ID=1
+    depends_on:
+      user-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - novachat-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  novachat-net:
+    driver: bridge

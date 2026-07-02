@@ -1,0 +1,15 @@
+# NovaChat C++ Code Style
+# Based on Google style with minor adjustments
+BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+PointerAlignment: Left
+SortIncludes: true
+IncludeBlocks: Regroup

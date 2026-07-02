@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package nova.gateway;
+
+import "nova/common/common.proto";
+
+// =============================================================================
+// NovaChat — PushService RPC 定义 (网关反向推送接口)
+//
+// 调用方:  C++ 核心服务 (message-service / user-service)
+// 实现方:  TS BFF 网关 (HTTP Server)
+// 通信:    C++ bRPC Channel (HTTP 模式) → 网关 HTTP Endpoint
+//
+// 核心场景:
+//   1. 消息推送:        message-service → PushUpdate → 网关 → WebSocket → 用户
+//   2. 群组广播:        message-service → PushToUsers → 网关 → 并发推送给群在线成员
+//   3. 会话管理:        user-service   → KickUser → 网关强制断开某用户连接
+//   4. 在线探测:        message-service → IsUserOnline → 判断是否需要离线存储
+// =============================================================================
+
+// ============================= PushUpdate ====================================
+// 单用户推送: C++ 服务查 Redis 路由表找到目标网关 → 调用此 RPC
+
+message PushUpdateReq {
+    int64                target_user_id = 1;   // 目标用户
+    nova.common.Update   update         = 2;   // 要推送的 Update (消息/状态/输入中...)
+    bool                 skip_offline   = 3;   // true: 用户不在线则直接丢弃 (如 typing 指示)
+                                               // false: 用户不在线时返回 missed, 由调用方决定是否离线存储
+    int64                 push_id       = 4;   // 幂等键: 调用方生成的唯一推送 ID (Snowflake),
+                                               // 网关去重, 防止 bRPC 重试导致重复推送
+    int32                 ttl_seconds   = 5;   // 推送存活时间: 超时后即使在线也不再推送 (默认 30s)
+}
+
+message PushUpdateResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    bool                  delivered     = 3;   // true: 用户在线且已发送到 WebSocket
+                                               // false: 用户离线或不在本节点
+    int64                 push_id       = 4;   // 回显 push_id, 方便调用方对账
+}
+
+// ============================= PushToUsers ===================================
+// 批量推送: 群消息场景，一次 RPC 推送给同一网关节点上的多个在线用户
+
+message PushToUsersReq {
+    repeated int64        target_user_ids = 1;   // 目标用户列表 (max 500)
+    nova.common.Update    update          = 2;   // 共享的 Update (网关复制后分发给各用户)
+    bool                  skip_offline    = 3;
+    int64                 push_id         = 4;   // 幂等键 (整个批次的唯一 ID)
+    int32                 ttl_seconds     = 5;
+}
+
+message PushToUsersResp {
+    nova.common.ErrorCode error_code         = 1;
+    string                error_message      = 2;
+    repeated int64        delivered_user_ids = 3;   // 成功送达的用户 ID
+    repeated int64        missed_user_ids    = 4;   // 不在本节点或离线的用户 ID
+    int64                 push_id            = 5;
+}
+
+// ============================= KickUser ======================================
+// 强制断开: user-service 在 Token 失效、账户注销、多端互踢等场景下调用
+
+enum KickReason {
+    KICK_SESSION_EXPIRED    = 0;   // Token 过期
+    KICK_ACCOUNT_DELETED    = 1;   // 账户已注销
+    KICK_ANOTHER_DEVICE     = 2;   // 多端登录互踢 (新设备登录, 旧设备下线)
+    KICK_SERVER_MAINTENANCE = 3;   // 服务端维护, 主动断开
+    KICK_BANNED             = 4;   // 用户被封禁
+    KICK_ADMIN_FORCE        = 5;   // 管理员强制下线
+}
+
+message KickUserReq {
+    int64      user_id = 1;
+    KickReason reason  = 2;
+    string     message = 3;   // 可选: 客户端展示的提示信息
+}
+
+message KickUserResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    bool                  kicked        = 3;   // true: 成功踢出; false: 用户不在本节点
+}
+
+// ============================= IsUserOnline ==================================
+// 在线探测: C++ 服务在发消息前快速判断用户是否在线, 决定是否走离线存储
+
+message IsUserOnlineReq {
+    int64 user_id = 1;
+}
+
+message IsUserOnlineResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    bool                  is_online     = 3;
+    int64                 last_seen_at  = 4;   // 最近在线时间 (unix ms), 不在线时有效
+}
+
+// ============================= NotifyGateway =================================
+// 服务通知: 网关间或服务间的事件通知 (如 Redis 路由表变更)
+
+enum GatewayEvent {
+    GATEWAY_USER_ONLINE   = 0;   // 有新用户上线 (来自其他网关的广播)
+    GATEWAY_USER_OFFLINE  = 1;   // 用户下线
+    GATEWAY_CONFIG_RELOAD = 2;   // 重新加载配置 (无需重启)
+    GATEWAY_CLEAR_SESSION = 3;   // 清除指定用户的本地会话缓存
+}
+
+message NotifyGatewayReq {
+    GatewayEvent event  = 1;
+    int64        user_id = 2;   // 可选: 事件关联的用户
+    bytes        payload = 3;   // 可选: 事件附加数据
+}
+
+message NotifyGatewayResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+}
+
+// ============================= BatchOnlineCheck ==============================
+// 批量在线检查: 群消息发送前, 一次性查询所有群成员在线状态
+
+message BatchOnlineCheckReq {
+    repeated int64 user_ids = 1;   // max 500
+}
+
+message BatchOnlineCheckResp {
+    nova.common.ErrorCode error_code          = 1;
+    string                error_message       = 2;
+    repeated int64        online_user_ids     = 3;   // 在线的用户 ID
+    repeated int64        offline_user_ids    = 4;   // 离线的用户 ID
+}
+
+// ============================= Service 定义 ===================================
+
+service PushService {
+    // 单用户推送 — 最常用, 消息推送给指定用户
+    rpc PushUpdate        (PushUpdateReq)        returns (PushUpdateResp);
+
+    // 批量推送 — 群消息推给同一网关节点的多个在线成员
+    rpc PushToUsers       (PushToUsersReq)       returns (PushToUsersResp);
+
+    // 强制断开 — Token 失效 / 多端互踢 / 封禁
+    rpc KickUser          (KickUserReq)          returns (KickUserResp);
+
+    // 在线探测 — 发消息前判断目标是否在线
+    rpc IsUserOnline      (IsUserOnlineReq)      returns (IsUserOnlineResp);
+
+    // 批量在线检查 — 群消息场景一次性获知所有成员在线分布
+    rpc BatchOnlineCheck  (BatchOnlineCheckReq)  returns (BatchOnlineCheckResp);
+
+    // 网关事件通知 — 网关间协调 (多网关部署时使用)
+    rpc NotifyGateway     (NotifyGatewayReq)     returns (NotifyGatewayResp);
+}

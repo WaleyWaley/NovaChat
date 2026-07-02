@@ -1,0 +1,29 @@
+# Node.js
+**/node_modules
+**/dist
+**/.npm
+
+# Build artifacts
+build/
+gen/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed for build)
+*.md
+!README.md
+
+# Plans / logs
+.claude/

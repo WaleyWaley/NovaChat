@@ -1,0 +1,28 @@
+# =============================================================================
+# NovaChat Message Service — 配置文件
+# =============================================================================
+
+--port=8002
+--listen_addr=0.0.0.0
+--idle_timeout_sec=-1
+--worker_id=2
+
+# --- 存储后端 ---
+# --enable_mysql
+# --enable_redis
+
+--mysql_addr=127.0.0.1
+--mysql_port=3306
+--mysql_user=root
+--mysql_passwd=
+--mysql_db=novachat
+--mysql_pool_size=8
+
+--redis_addr=127.0.0.1
+--redis_port=6379
+--redis_passwd=
+
+--log_dir=./logs
+--minloglevel=0
+--v=0
+--logbufsecs=0

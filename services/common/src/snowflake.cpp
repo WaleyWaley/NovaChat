@@ -39,12 +39,14 @@ Snowflake::Snowflake(int64_t worker_id)
 }
 
 int64_t Snowflake::NextId() {
+    // 获取当前时间戳 (毫秒)
     int64_t ts = CurrentMs();
 
     // 序列号自增 (同一毫秒内)
     int64_t seq = sequence_.fetch_add(1, std::memory_order_relaxed);
 
     {
+        // 线程安全: 保护 last_timestamp_ 的读写
         std::lock_guard<std::mutex> lock(mu_);
 
         if (ts > last_timestamp_) {
@@ -57,7 +59,7 @@ int64_t Snowflake::NextId() {
             int64_t back = last_timestamp_ - ts;
 
             if (back <= 5) {
-                // 轻微回拨 (≤ 5ms): spin 等待时钟追上
+                // 轻微回拨 (≤ 5ms)自旋等待: spin 等待时钟追上
                 NOVA_LOG_WARN << "Clock rollback detected: " << back
                               << "ms, waiting...";
                 ts = WaitNextMs(last_timestamp_);

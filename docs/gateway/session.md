@@ -31,4 +31,4 @@
 
 - **`jwt.ts`** — `verifyAccessToken` 在签名验证通过后调用 `sessionStore.getSync` 检查 session 是否被撤销，若已失效则返回 `SESSION_INVALIDATED` 错误。
 - **WebSocket 管理器** — 客户端登出请求和修改密码请求会触发 `invalidate` 或 `invalidateAllForUser` 调用。
-- **Phase 2.2 升级路径** — 当前为内存实现（Map），未来升级为 Redis 后 `SessionStore` 接口保持不变，仅切换实现类，对上层代码透明。
+- **当前实现** — 使用 `InMemorySessionStore`（Map 内存存储）。`SessionStore` 接口对上层透明，后续可无缝切换为 Redis 实现。

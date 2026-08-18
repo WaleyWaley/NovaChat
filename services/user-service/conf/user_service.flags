@@ -13,17 +13,24 @@
 # --- Snowflake Worker ID (集群中每个实例唯一, 0-1023) ---
 --worker_id=1
 
-# --- MySQL (Phase 2 启用) ---
-# --mysql_addr=127.0.0.1
-# --mysql_port=3306
-# --mysql_user=root
-# --mysql_passwd=
-# --mysql_db=novachat
+# --- 存储后端开关 (Phase 2) ---
+# 开发模式: 不开启, 使用内存存储
+# 生产模式: 去掉注释, 启用 MySQL + Redis
+# --enable_mysql
+# --enable_redis
 
-# --- Redis (Phase 2 启用) ---
-# --redis_addr=127.0.0.1
-# --redis_port=6379
-# --redis_passwd=
+# --- MySQL (enable_mysql=true 时有效) ---
+--mysql_addr=127.0.0.1
+--mysql_port=3306
+--mysql_user=root
+--mysql_passwd=
+--mysql_db=novachat
+--mysql_pool_size=8
+
+# --- Redis (enable_redis=true 时有效) ---
+--redis_addr=127.0.0.1
+--redis_port=6379
+--redis_passwd=
 
 # --- 日志 ---
 --log_dir=./logs

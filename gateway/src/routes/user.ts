@@ -83,7 +83,25 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         device_type: device_type ?? "",
       });
 
-      return reply.send(result);
+      if (result.error_code && result.error_code !== 0) {
+        return reply.send(result);
+      }
+
+      // 签发网关自己的 JWT (用 user-service 返回的 user_id)
+      const { signToken } = await import("../auth/jwt.js");
+      const user = result.user || { user_id: 0, username };
+      const jwtResult = signToken({
+        user_id: user.user_id,
+        username: user.username || username,
+      });
+
+      return reply.send({
+        ...result,
+        access_token: jwtResult.access_token,
+        refresh_token: jwtResult.refresh_token,
+        expires_at: jwtResult.expires_at,
+        user: user,
+      });
     }
   );
 
@@ -104,6 +122,35 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const result = await userClient.refreshToken({ refresh_token });
+      return reply.send(result);
+    }
+  );
+
+  /**
+   * POST /api/user/profile
+   * 查用户资料 (需认证)
+   */
+  app.post<{ Body: { user_id?: number; username?: string } }>(
+    "/api/user/profile",
+    async (request, reply) => {
+      const { user_id, username } = request.body;
+      const result = await userClient.getUserProfile({ user_id, username } as any);
+      return reply.send(result);
+    }
+  );
+
+  /**
+   * POST /api/user/search
+   * 搜索用户 (需认证)
+   */
+  app.post<{ Body: { query: string; limit?: number } }>(
+    "/api/user/search",
+    async (request, reply) => {
+      const { query, limit } = request.body;
+      if (!query) {
+        return reply.status(400).send({ error_code: 1302, error_message: "query is required" });
+      }
+      const result = await userClient.searchUsers({ query, limit: limit ?? 20 });
       return reply.send(result);
     }
   );

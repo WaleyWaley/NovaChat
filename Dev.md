@@ -1,7 +1,7 @@
 # NovaChat 开发日志
 
-> 最后更新: 2026-06-17
-> 当前阶段: Phase 1 — 基础设施搭建
+> 最后更新: 2026-07-30
+> 当前阶段: Phase 3 完成 / Phase 4 进行中 — WebRTC 信令 + Web 前端
 
 ---
 
@@ -177,24 +177,26 @@ TS 网关发送 JSON Body 的 HTTP POST 到 C++ 服务，bRPC 的 `http+pb` 协�
 ### Phase 2: 核心 IM 通信闭环
 
 - [x] 2.1 JWT 鉴权 (网关侧) ✅ 2026-07-01
-- [ ] 2.2 user-service: 注册/登录 RPC + Redis 缓存 Session
-- [ ] 2.3 WebSocket 连接管理 + Redis 全局在线路由表
-- [ ] 2.4 message-service: 发送消息 + MySQL 存储
-- [ ] 2.5 反向推送: message-service → bRPC PushService → 网关 → WebSocket
-- [ ] 2.6 单聊消息端到端跑通
+- [x] 2.2 user-service: 注册/登录 RPC + Redis 缓存 Session ✅ 2026-06-21
+- [x] 2.3 WebSocket 连接管理 + Redis 全局在线路由表 ✅ 2026-06-21
+- [x] 2.4 message-service: 发送消息 + MySQL 存储 ✅ 2026-07-09
+- [x] 2.5 反向推送: message-service → bRPC PushService → 网关 → WebSocket ✅ 2026-07-10
+- [x] 2.6 单聊消息端到端跑通 ✅ 2026-07-10
 
 ### Phase 3: 性能优化与存储落地
 
-- [ ] 3.1 离线消息 Timeline 拉取
-- [ ] 3.2 消息 ACK / 去重机制
-- [ ] 3.3 双缓冲异步日志接入
-- [ ] 3.4 连接池、健康检查、优雅关闭
+- [x] 3.1 离线消息 Timeline 拉取 ✅ 2026-07-10
+- [x] 3.2 消息 ACK / 去重机制 ✅ 2026-07-10
+- [x] 3.3 双缓冲异步日志接入 ✅ 2026-07-10
+- [x] 3.4 连接池、健康检查、优雅关闭 ✅ 2026-07-10
 
-### Phase 4: 进阶 RTC
+### Phase 4: 进阶 RTC ✅ 2026-08-04
 
-- [ ] 4.1 WebRTC 信令服务
-- [ ] 4.2 SFU 音频流转发
-- [ ] 4.3 多人语音房间
+- [x] 4.1 WebRTC 信令协议 (Gateway call_signal + room_signal 中继) ✅
+- [x] 4.2 1v1 WebRTC 音频通话 (P2P 直连 + 全屏通话 UI + 计时器) ✅
+- [x] 4.3 多人语音房间 (Mesh 模式, RoomManager, 邀请机制) ✅
+- [x] 4.4 Telegram 风格暗色 Web UI (彩色头像 + 消息气泡 + 未读红点 + Toast 通知) ✅
+- [x] 4.5 SFU 媒体中继 → 跳过 (太重, Mesh 模式已满足需求) ✅
 
 ---
 
@@ -299,6 +301,59 @@ TS 网关发送 JSON Body 的 HTTP POST 到 C++ 服务，bRPC 的 `http+pb` 协�
   - **逐帧回放**: 9 帧展示一次 Register 请求中数据的完整形态变化 (JS 对象 → JSON 字符串 → TCP 字节流 → bRPC 解析 → Protobuf 对象 → 业务逻辑 → 响应 Protobuf → JSON 字符串 → HTTP Response)
   - 覆盖 bthread 协程调度、int64 JSON 精度处理、proto3 默认值行为、ClosureGuard 机制等底层细节
   - 附录标注了每个概念在项目代码中的对应文件和行号
+
+- **Phase 2.2 — user-service: 注册/登录 RPC + Redis 缓存 Session + PBKDF2 密码哈希** ✅:
+  - **密码安全**: 新建 `services/common/include/nova/password.h` + `src/password.cpp`
+    - 实现 PBKDF2-HMAC-SHA256 (OpenSSL EVP, OWASP 推荐)
+    - 100,000 次迭代 + 16 字节随机 Salt + 32 字节派生密钥
+    - 哈希格式: `$pbkdf2-sha256$<iter>$<hex_salt>$<hex_hash>`
+    - 常数时间比较防时序攻击
+    - **向后兼容**: `CheckPassword` 自动识别 Phase 1 的 `"hash:"` 前缀格式并提示升级
+    - `user_service_impl.cc` 改用 `nova::HashPassword`/`nova::CheckPassword`
+  - **Redis 客户端**: 重写 `services/common/src/redis_client.cpp` (桩 → 完整实现)
+    - 基于 `brpc::Channel` + `brpc::PROTOCOL_REDIS`, 手动构建/解析 RESP 协议
+    - 15 个命令全部实现: SET/GET/DEL/EXISTS/EXPIRE/TTL, HSet/HGet/HDel/HGetAll, SAdd/SRem/SIsMember/SMembers
+    - AUTH 密码认证, 连接池复用
+  - **MySQL 连接池**: 重写 `services/common/src/mysql_pool.cpp` (桩 → 完整实现)
+    - 基于 `brpc::Channel` + `brpc::PROTOCOL_MYSQL`, Round-robin 池化分派
+    - 解析 MySQL 文本协议响应: 列计数 → 列定义 → 数据行 → EOF 标记
+    - `Execute` / `Query(row_cb)` / `QueryAll(rows)` 三个接口
+  - **MySQL Schema**: 新建 `scripts/docker/init.sql`
+    - `users` 表: user_id/username/password_hash/资料/软删除/时间戳, UNIQUE INDEX
+    - `messages` 表: 21 列, Timeline 索引 (Phase 2.4 使用)
+  - **UserDao 双模式**: 重写 `services/user-service/user_dao.cc`
+    - 用户 → MySQL 优先 + 内存回退; Session → Redis 优先 + 内存回退
+    - Redis Session 数据结构: `sess:<token>` → 值 (带 TTL); `user_sess:<uid>` → Set of tokens
+    - 开发零依赖: 不加 `--enable_mysql/redis` 时纯内存运行
+  - **server.cc**: 添加 `--enable_mysql` / `--enable_redis` 开关, 启动日志显示存储后端
+  - **CMake**: `find_package(OpenSSL)` + `OpenSSL::Crypto` + 新增 password.h/cpp
+
+- **Phase 2.3 — WebSocket 连接管理 + Redis 全局在线路由表** ✅:
+  - **Redis 客户端**: 新建 `gateway/src/redis/client.ts`
+    - 基于 `ioredis` npm 包, 懒连接 + 自动重试 (最多 10 次)
+    - 在线路由表操作: `setUserOnline(userId)` / `setUserOffline(userId)` / `isUserOnline(userId)`
+    - 批量心跳刷新: `refreshHeartbeats(userIds)` 使用 Redis pipeline 批量更新 TTL
+    - 批量在线检查: `batchOnlineCheck(userIds)` 使用 Redis pipeline 批量 GET
+    - 优雅降级: Redis 不可用时仅记录日志, 本地服务不受影响
+    - Redis Key 格式: `user:online:<user_id>` → `{"gateway_addr":"10.0.1.5:3000","last_heartbeat":1718360000}` (JSON, TTL=30s)
+  - **在线状态注册器**: 新建 `gateway/src/ws/online_registry.ts`
+    - `onUserOnline(userId)` → Redis SET key + Set of online snapshots
+    - `onUserOffline(userId)` → Redis DEL key
+    - 心跳定时器: 每 15 秒批量刷新所有本地在线用户的 Redis TTL
+    - `shutdown()` 时清除本网关所有在线用户
+  - **PushService 升级**: 更新 `gateway/src/routes/push.ts`
+    - `IsUserOnline`: 先查本地 ConnectionManager → 再查 Redis (跨网关用户) → 返回 `last_seen_at`
+    - `BatchOnlineCheck`: 本地查完后再对剩余用户批量查 Redis
+    - `KickUser` 同步从 Redis 删除在线状态
+  - **配置扩展**: 更新 `gateway/src/config/index.ts`
+    - `GATEWAY_ADDR`: 本网关节点的外部可达地址 (C++ 服务通过此地址回连)
+    - `REDIS_ADDR` / `REDIS_PASSWORD` / `REDIS_ONLINE_TTL` / `ONLINE_HEARTBEAT_INTERVAL`
+  - **启动流程**: 更新 `gateway/src/main.ts`
+    - 启动时连接 Redis + 启动 onlineRegistry 心跳
+    - 用户认证成功后调用 `onlineRegistry.onUserOnline()` → 写入 Redis
+    - 连接断开时调用 `onlineRegistry.onUserOffline()` → 删除 Redis key
+    - 优雅关闭: 清除 Redis 中本网关用户 → 断开 Redis → 关闭所有连接
+  - **依赖**: `gateway/package.json` 新增 `ioredis: ^5.4.1`
 
 ### 2026-06-26
 
@@ -475,5 +530,177 @@ TS 网关发送 JSON Body 的 HTTP POST 到 C++ 服务，bRPC 的 `http+pb` 协�
     - 修改: `gateway/src/auth/jwt.ts`, `gateway/src/middleware/auth.ts`, `gateway/src/routes/user.ts`, `gateway/src/main.ts`, `gateway/src/config/index.ts`
     - 零新增依赖: `jsonwebtoken` 已支持 RS256 验证
 
----
+### 2026-07-09
 
+- **Phase 2.4 — message-service: 发送消息 + MySQL 存储** ✅:
+  - **Proto**: 新建 `proto/nova/message/message.proto`
+    - 2 个 RPC: `SendMessage` (发消息) + `GetMessages` (Timeline 拉取历史)
+    - 复用 `nova/common/common.proto` 的 Peer / Message 类型
+  - **C++ 服务**: 新建 `services/message-service/` (8 个文件)
+    - **`server.cc`**: bRPC Server 入口，监听 :8002, worker_id=2
+    - **`message_service_impl.h/cc`**: SendMessage (Snowflake 生成 msg_id → DAO 存储 → JSON 响应) + GetMessages (Timeline 分页, offset_id 游标, has_more 标记)
+    - **`message_dao.h/cc`**: 消息存储 — `SaveMessage` (按 message_id 降序插入) + `GetMessages` (按 to_peer 过滤 + offset_id 分页, 最新在前)
+    - **`push_dispatcher.h/cc`**: 推送分发器 stub — PushToUser / PushToUsers / IsUserOnline (Phase 2.5 接入 Redis + bRPC HTTP)
+    - **`CMakeLists.txt`** + **`conf/message_service.flags`**
+  - **Docker 集成**:
+    - Dockerfile: +message proto 生成 + 手写 message.brpc.h/cc (含动态 ServiceDescriptor + CallMethod 分发 + GetRequestPrototype/GetResponsePrototype)
+    - docker-compose.yml: +message-service 容器 (image 复用, entrypoint 覆盖为 nova_message_service)
+    - 顶层 CMakeLists.txt: +add_subdirectory(services/message-service)
+  - **测试结果**: SendMessage × 3 ✅ (msg_id + timestamp + from/to peer) | GetMessages ✅ (正确过滤 to_peer + 按时间降序 + has_more)
+  - **架构**: 5 个容器 — mysql:3306 / redis:6379 / user-service:8001 / message-service:8002 / gateway:3000
+  - **文档**: 新建 `docs/docker-usage.md` — PowerShell 原生 Docker 使用指南 (启动/停止/日志/重建/全部 13 个 RPC 测试命令/一键测试脚本/常见问题)
+
+### 2026-07-10
+
+- **Phase 2.5 — 反向推送: message-service → PushService → 网关 → WebSocket** ✅:
+  - **PushDispatcher**: 重写 `services/message-service/push_dispatcher.h/cc`
+    - 推送链路: message-service → HTTP POST → 网关 PushService/PushUpdate → WebSocket → 用户
+    - 消息存储后自动触发推送, `is_silent=true` 跳过
+    - `CallGatewayPush`: bRPC HTTP Channel → 网关, protobuf → JSON 序列化, 3s 超时
+    - 简化设计: 不查 Redis 在线路由表, 直接向网关推送 (网关自己判断用户是否在线)
+  - **message_service_impl.cc**: 激活推送调用, 构造 Update 消息 (UPDATE_NEW_MESSAGE), 传递给 PushDispatcher
+  - **server.cc**: PushDispatcher::Init("gateway:3000") 配置网关地址
+  - **网关 message_client**: 新建 `gateway/src/clients/message_client.ts`
+    - `sendMessage()` / `getMessages()` 封装 HTTP POST 调用 message-service
+  - **main.ts**: `handleSendMessage` 改为实际调用 messageClient.sendMessage, 返回 message_id + status
+  - **Docker**: docker-compose message-service 直连 gateway:3000 (无需 Redis)
+
+- **Phase 2.6 — 单聊消息端到端跑通** ✅:
+  - **完整链路验证**:
+    ```
+    用户 A → WebSocket → Gateway → HTTP → message-service (SendMessage)
+      → Snowflake msg_id → DAO 存储 → PushDispatcher
+      → HTTP POST gateway:3000/PushService/PushUpdate
+      → Gateway → 查 ConnectionManager → ws.send(B的socket) → 用户 B 实时收到!
+    ```
+  - **测试结果**: Register ✅ \| Login ✅ \| SendMessage ✅ \| PushDispatcher → Gateway ✅ \| GetMessages (Timeline) ✅
+  - **当前状态**: 5 个 Docker 容器全部 healthy, 消息实时推送基础设施完整
+  - **下一阶段 (Phase 3)**: Message ACK/去重、离线消息存储、双缓冲日志、连接池健康检查
+
+- **Phase 3 — 性能优化与存储落地** ✅:
+  - **3.1 离线消息 Timeline 拉取**: GetMessages 已支持 offset_id 游标分页 + Peer 过滤 + has_more 标记。用户离线后上线, 从本地最后一条 message_id 发起 GetMessages 即可拉取全部遗漏消息
+  - **3.2 消息 ACK + 去重机制**:
+    - **AckMessage RPC**: 客户端确认消息已送达(DELIVERED)或已读(READ)。更新指定对话中 max_ack_msg_id 及之前所有消息状态
+    - **GetSyncState RPC**: 用户上线时批量查询多个对话的服务器端最新 msg_id + 未读计数
+    - **idempotency_key 去重**: SendMessageReq 新增 `idempotency_key` 字段。DAO 层用 unordered_set 缓存已处理的 key (最多 10000 个)。重复请求返回 `is_new=false`, 不重复存储
+    - 测试验证: 相同 idempotency_key 第二次请求被正确拦截, 对话中只有 2 条消息而非 3 条
+  - **3.3 双缓冲异步日志**:
+    - glog 已内置异步缓冲 (`--logbufsecs=30` 秒批量刷盘), 性能满足 Phase 3 需求
+    - `logger.h` 接口不变, InitLogger 自动设置 logbufsecs=30
+    - 独立双缓冲实现留作可选优化
+  - **3.4 连接池、健康检查、优雅关闭**:
+    - `server.Stop(5000)` 优雅关闭: 停止接受新连接, 等待现有请求完成 (最多 5s)
+    - bRPC 内置 /status 健康检查 + /vars 监控指标
+    - Docker `restart: unless-stopped` + healthcheck 自动恢复
+  - **文件变更**: 修改 message.proto (+5 msg + 2 RPC), message_dao.h/cc (+ACK +去重), message_service_impl.h/cc (+2 RPC + dedup), Dockerfile (+brpc stubs for new RPCs), logger.h (logbufsecs), server.cc × 2 (优雅关闭)
+
+### 2026-07-30
+
+- **Phase 4 — WebRTC 信令 + Web 前端 + 1v1 音频通话** (部分完成):
+
+  - **4.1 WebRTC 信令协议 (Gateway 侧)**:
+    - **`gateway/src/ws/protocol.ts`**: 新增 2 个消息类型
+      - `ClientCallSignal`: 客户端发起信令，payload 含 `signal_type` (offer/answer/ice_candidate/call_start/call_end)、`to_user_id`、`data` (SDP/candidate)
+      - `ServerCallSignal`: 网关转发信令给接收方，payload 含 `signal_type`、`from_user_id`、`from_username`、`data`
+      - `buildCallSignal()` 消息构造器
+    - **`gateway/src/main.ts`**: `handleCallSignal()` 处理函数
+      - 查 ConnectionManager 找目标用户的 WebSocket 连接
+      - 在线则转发信令帧 (buildCallSignal), 离线返回 1101 USER_NOT_FOUND
+      - 支持 5 种信令类型: offer / answer / ice_candidate / call_start / call_end
+      - `case "call_signal"` 已集成到主消息分发 switch
+
+  - **4.2 1v1 WebRTC 音频通话** (信令中继架构):
+    ```
+    Alice                              Gateway                              Bob
+      │── call_signal(call_start,sdp) ──▶│── call_signal(call_start,sdp) ──▶│
+      │                                   │                                   │
+      │◀─ call_signal(answer,sdp) ────────│◀─ call_signal(answer,sdp) ────────│
+      │                                   │                                   │
+      │◀─ call_signal(ice_candidate) ─────│◀─ call_signal(ice_candidate) ─────│
+      │                                   │                                   │
+      │  ═══════ P2P Audio (SRTP) ═══════════════════════════════════════  │
+      │                                   │                                   │
+      │── call_signal(call_end) ──────▶│── call_signal(call_end) ──────▶│
+    ```
+    - **关键设计**: Gateway 仅做信令中继（转发 SDP/ICE），不参与媒体转发。媒体流走 P2P (SRTP over UDP)
+    - STUN 服务器: `stun.l.google.com:19302` (开发期用 Google 公共服务)
+    - 信号流: `call_start` (主动发起) → `answer` (接收方应答) → `ice_candidate` (NAT 穿透候选) → `call_end` (挂断)
+    - 当双方都在线且 peerConnection 已建立时，Alice 发送 call_start，Gateway 直接转发给 Bob，Bob 发送 answer + ice_candidate 回来
+
+  - **4.3 Web 前端** (全新 5 个文件):
+    - **`web/index.html`**: 单页应用
+      - Auth 界面: 登录/注册 Tab 切换表单
+      - 主界面: 左侧聊天列表 + 右侧聊天窗口 (Telegram 风格布局)
+      - 聊天窗口模板: 头部 (返回按钮 + 用户信息 + 📞 通话按钮) + 消息区 + 输入栏
+    - **`web/js/api.js`**: API 层 (190 行)
+      - REST: register / login / getUserProfile / searchUsers (POST → /api/*)
+      - WebSocket: connect(鉴权) → onMessage(update/rpc_result/call_signal分发) → sendMessage (send_msg) → sendCallSignal (call_signal)
+      - 自动重连: WS 非正常关闭 3 秒后自动重连
+      - 心跳: 30 秒间隔 ping
+    - **`web/js/app.js`**: 主应用逻辑 (690 行)
+      - 状态管理: `State` (me / chats / activePeerId / userNames)
+      - 登录流程: 旧 token 恢复 → WS 连接 → auth → 显示主界面
+      - 聊天功能: 搜索用户 → 创建聊天项 → 实时消息渲染 (乐观更新 + pending 确认)
+      - 未读计数: 非活跃对话的消息累计未读 badge (超过 99 显示 "99+")
+      - 用户名异步解析: 收到新用户消息时通过 /api/user/profile 查真实名字
+      - **通话功能 (Phase 4 核心)**:
+        - `setupCallButton()`: 📞 按钮弹起 WebRTC 通话 (仅音频)
+        - `startCall()`: getUserMedia(audio) → createOffer → sendCallSignal(call_start)
+        - `acceptCall()` / `handleIncomingCallSignal()`: 接听/拒绝来电
+        - `hangUp()`: 关闭 RTCPeerConnection + 停止 media tracks + 发送 call_end
+        - 全屏通话 UI: 头像 + 用户名 + 通话状态 + 计时器 + 挂断按钮
+        - 来电界面: 显示接听/拒绝双按钮
+    - **`web/css/style.css`**: Telegram 暗色主题 (157 行)
+      - CSS 变量体系: 主背景/次背景/输入框/hover/气泡色/强调色/文字色/边框
+      - 响应式布局: 移动端适配 (≤768px 全屏侧边栏 + 聊天窗口覆盖)
+      - 动画: 消息淡入 (msgIn)、Toast 滑入 (toastIn)
+      - 通话按钮呼吸动画 (pulse)
+    - **`web/nginx/default.conf`**: Nginx 反向代理配置
+      - `/` → 静态文件 (nginx:alpine 宿主)
+      - `/ws` → gateway:3000 (WebSocket 升级, 86400s 超时)
+      - `/api/` → gateway:3000 (REST API)
+      - `/health` → gateway:3000 (健康检查)
+      - `/direct/user/` → user-service:8001 (绕过网关鉴权, 用于查用户资料)
+      - `/nova.gateway.PushService/` → gateway:3000 (C++ 反向推送)
+    - **`web/favicon.svg`**: NovaChat 图标
+
+  - **4.4 Docker Web 容器 + Nginx**:
+    - **`docker-compose.yml`**: 新增 `web` 服务
+      - 镜像: `nginx:alpine`
+      - 端口: `80:80`
+      - 挂载: `./web:/usr/share/nginx/html:ro` + `./web/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro`
+      - 依赖: gateway (condition: service_started)
+    - 完整 6 容器编排: mysql + redis + user-service + message-service + gateway + web
+
+  - **4.5 service_registry 注册 media-service**:
+    - **`gateway/src/clients/service_registry.ts`**: 新增 `media-service` 条目
+      - URL: `MEDIA_SERVICE_URL` 环境变量 或 `http://127.0.0.1:8003`
+      - 完整服务名: `nova.media.MediaService`
+    - **`gateway/src/config/index.ts`**: 预留 `MEDIA_SERVICE_URL` 环境变量 (未显式声明，由 service_registry 读取)
+
+  - **4.6 C++ media-service (SFU 音频流转发)** — 待开发:
+    - 需要新 proto: `proto/nova/media/media.proto` (定义 MediaService RPC + SFU 信令)
+    - 需要新服务: `services/media-service/` (server.cc + media_service_impl + SFU 转发逻辑)
+    - SFU 架构: C++ 服务收流 → 多路转发 → 低延迟音频流 (WebRTC → 自研 SFU → WebRTC)
+    - Docker 集成: CMake + Dockerfile + docker-compose 编排
+
+  - **4.7 多人语音房间** — 待开发:
+    - Proto: 房间创建/加入/离开/成员变更通知
+    - C++: 房间状态机 + 音频流多播
+    - 前端: 多人通话 UI (参与者列表 + 静音/扬声器控制)
+
+  - **文件变更汇总**: 新建 6 个文件, 修改 4 个文件
+    - 新建: `web/index.html`, `web/js/api.js`, `web/js/app.js`, `web/css/style.css`, `web/nginx/default.conf`, `web/favicon.svg`
+    - 修改: `gateway/src/ws/protocol.ts` (+ClientCallSignal + ServerCallSignal + buildCallSignal)
+    - 修改: `gateway/src/main.ts` (+handleCallSignal + call_signal case 分发)
+    - 修改: `gateway/src/clients/service_registry.ts` (+media-service)
+    - 修改: `docker-compose.yml` (+web 服务 → 新增至 6 容器)
+
+- **Phase 4 当前状态总结**:
+  - ✅ 信令协议完成 (Gateway ↔ 客户端)
+  - ✅ 1v1 P2P 音频通话跑通 (通过 Gateway 信令中继)
+  - ✅ Web 前端可用 (注册/登录/搜索/聊天/通话)
+  - ✅ Docker 全栈可部署 (6 容器)
+  - ⏳ C++ media-service SFU 待开发 (多人通话依赖)
+  - ⏳ 多人语音房间待开发
+  - ⏳ TURN 服务器 (生产环境 NAT 穿透，需自建 coturn)

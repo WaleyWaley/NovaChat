@@ -6,7 +6,7 @@
 
 ### RPC 接口清单
 
-UserService 共定义 **11 个 RPC 方法**，按功能域分为六组：
+UserService 共定义 **12 个 RPC 方法**，按功能域分为五组：
 
 **1. 认证相关**
 - `Register`（注册）：接收用户名、密码、姓名、手机号等，返回用户 ID、Access Token 和 Refresh Token。设计上"注册即登录"，减少客户端交互步骤。
@@ -19,23 +19,21 @@ UserService 共定义 **11 个 RPC 方法**，按功能域分为六组：
 - `GetUsers`（批量查询）：单次最多 100 个用户 ID，返回顺序与请求 ID 顺序对应，不存在的条目返回默认空实例。
 
 **3. 资料修改**
-- `UpdateProfile`（更新资料）：支持修改 firstName、lastName、Bio、头像等。Username 不允许在此修改，Telegram 风格限制为每 15–30 天改一次。
-- `ChangeUsername`（修改用户名）：独立的 RPC 以施加更严格的变更频率限制。
-
-**4. 用户名操作**
+- `UpdateProfile`（更新资料）：支持修改 firstName、lastName、Bio、头像等。
+- `ChangeUsername`（修改用户名）：独立的 RPC 以施加更严格的变更频率限制（1 小时内限制修改一次）。
 - `CheckUsername`（可用性检查）：注册流程中实时校验用户名是否被占用。
 
-**5. 搜索**
-- `SearchUsers`（搜索用户）：支持 username 或 first_name 前缀匹配，基于 `offset_id` 的分页模型（向下翻页）。
+**4. 搜索**
+- `SearchUsers`（搜索用户）：支持 username 或 first_name 前缀匹配，基于 `offset_id` 的分页模型（向下翻页，上限 50）。
 
-**6. 账户管理**
+**5. 账户管理**
 - `ChangePassword`（修改密码）：需要旧密码验证，修改后清除所有活跃 Session（安全措施）。
 - `DeleteAccount`（删除账户）：需密码二次确认，软删除（标记 `is_deleted`）。
 
 ### 设计要点
 
 - **Token 体系**：Access Token（24h 短效）+ Refresh Token（30d 长效），所有 Token 使用 JWT 签发。`refresh_token` 支持轮转，旧 Token 立即作废。
-- **密码处理**：明文密码仅在网关与服务之间的 TLS 加密通道中传输，服务端收到后立即进行 bcrypt 哈希并丢弃明文。
+- **密码处理**：服务端收到明文密码后使用 PBKDF2-HMAC-SHA256（100,000 次迭代）进行哈希并丢弃明文。格式为 `$pbkdf2-sha256$<iter>$<salt>$<hash>`。
 - **设备管理**：Login 请求携带 `device_name` 和 `device_type`，为后续多端登录管理和 "其他设备已登录" 互踢场景做准备。
 
 ## 业务角色

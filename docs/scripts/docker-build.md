@@ -2,18 +2,18 @@
 
 ## 技术说明
 
-`docker-build.sh` 是 NovaChat 项目中用于构建 C++ 微服务 Docker 镜像的脚本，位于 `scripts/` 目录。脚本内容极为精简，仅执行一个核心操作。
+`docker-build.sh` 是 NovaChat 项目中用于构建 C++ 微服务 Docker 镜像的脚本，位于 `scripts/` 目录。执行后构建一个共享镜像 `novachat:latest`，user-service 和 message-service 共用同一镜像，通过不同 entrypoint 启动。
 
 ### 执行流程
 
 1. **目录定位**：`cd "$(dirname "$0")/.."` 将工作目录切换到项目根目录（`D:\NovaChat`），确保 Docker build context 正确指向包含 `Dockerfile` 的项目根目录。
-2. **Docker 构建**：`docker build -t novachat-user-service .` 使用项目根目录下的 `Dockerfile` 构建 Docker 镜像，镜像名标记为 `novachat-user-service`。
+2. **Docker 构建**：`docker build -t novachat:latest .` 使用项目根目录下的 `Dockerfile` 构建 Docker 镜像。镜像包含 user-service（:8001）和 message-service（:8002）两个 C++ 微服务。
 3. **错误处理**：`set -e` 确保任何步骤失败时脚本立即退出，避免构建不完整的镜像被误用。
 4. **输出重定向**：`2>&1` 将 stderr 合并到 stdout，在 CI 日志中统一查看构建输出。
 
 ### 当前的局限
 
-脚本目前硬编码为构建 `novachat-user-service` 单个镜像。项目规模扩大后，预期会扩展为支持多服务构建（如 `novachat-message-service`、`novachat-gateway` 等），可能采用 Docker Compose 或 BuildKit 多阶段构建来管理多个镜像。
+脚本目前构建单一共享镜像 `novachat:latest`，user-service 和 message-service 共用。Docker Compose 中通过不同 `command` 和 `entrypoint` 启动两个服务。项目规模扩大后，预期可能拆分为独立的 Dockerfile 或使用 BuildKit 多阶段构建。
 
 ## 业务角色
 

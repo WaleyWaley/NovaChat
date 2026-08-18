@@ -4,19 +4,21 @@
  * 调用方: C++ 核心服务 (message-service / user-service) 通过 bRPC HTTP Channel
  * 实现方: TS 网关 (本文件)
  *
- * 这些端点处于 JWT 白名单中，由 C++ 服务内部调用，不经过客户端鉴权。
- * 网关根据在线路由表查找目标用户的 WebSocket 连接并推送。
+ * Phase 2.3: IsUserOnline / BatchOnlineCheck 升级为全局在线查询
+ *   - 先查本地 ConnectionManager
+ *   - 本地不在线时查 Redis 在线路由表 (用户可能在另一个网关上)
  */
 
 import type { FastifyInstance } from "fastify";
 import { connectionManager } from "../ws/connection.js";
+import { gatewayRedis } from "../redis/client.js";
 import { logger } from "../utils/logger.js";
 import { buildUpdate, buildKicked } from "../ws/protocol.js";
 
 // ---- 请求/响应类型 (与 push.proto 对齐) ----
 
 interface PushUpdateReq {
-  target_user_id: number;
+  target_user_id: string | number;
   update: {
     type: number;
     payload?: Record<string, unknown>;
@@ -34,7 +36,7 @@ interface PushUpdateResp {
 }
 
 interface PushToUsersReq {
-  target_user_ids: number[];
+  target_user_ids: (string | number)[];
   update: {
     type: number;
     payload?: Record<string, unknown>;
@@ -47,8 +49,8 @@ interface PushToUsersReq {
 interface PushToUsersResp {
   error_code: number;
   error_message: string;
-  delivered_user_ids: number[];
-  missed_user_ids: number[];
+  delivered_user_ids: string[];
+  missed_user_ids: string[];
   push_id: number;
 }
 
@@ -76,14 +78,14 @@ interface IsUserOnlineResp {
 }
 
 interface BatchOnlineCheckReq {
-  user_ids: number[];
+  user_ids: string[];
 }
 
 interface BatchOnlineCheckResp {
   error_code: number;
   error_message: string;
-  online_user_ids: number[];
-  offline_user_ids: number[];
+  online_user_ids: string[];
+  offline_user_ids: string[];
 }
 
 interface NotifyGatewayReq {
@@ -106,7 +108,9 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: PushUpdateReq }>(
     `${SERVICE_PATH}/PushUpdate`,
     async (request) => {
-      const { target_user_id, update, skip_offline, push_id } = request.body;
+      // bRPC json2pb 输出 camelCase, Fastify 解析后字段名是 camelCase
+      const target_user_id = (request.body as any).target_user_id ?? (request.body as any).targetUserId;
+      const { update, skip_offline, push_id } = request.body as any;
 
       // 幂等去重
       if (push_id && connectionManager.isDuplicatePush(push_id)) {
@@ -120,7 +124,7 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // 跳过离线时的推送 (如 typing 指示)
-      if (skip_offline && !connectionManager.isOnline(target_user_id)) {
+      if (skip_offline && !connectionManager.isOnline(String(target_user_id))) {
         return {
           error_code: 0,
           error_message: "",
@@ -129,12 +133,21 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
         } as PushUpdateResp;
       }
 
-      // 构造 ServerMessage 并推送
-      const serverMsg = buildUpdate(
-        update.type,
-        update.payload ?? {}
-      );
-      const delivered = connectionManager.sendToUser(target_user_id, serverMsg);
+      const { type: _t, ...data } = update as Record<string, unknown>;
+      const serverMsg = buildUpdate((update as any).type || 0, data);
+      // 先获取所有在线用户, 再检查目标是否在其中
+      const onlineIds = connectionManager.getOnlineUserIds();
+      const isOnline = connectionManager.isOnline(String(target_user_id));
+      logger.info({ target: target_user_id, isOnline, onlineCount: onlineIds.length, targetInList: onlineIds.includes(String(target_user_id)) }, "PushUpdate");
+      let delivered = connectionManager.sendToUser(String(target_user_id), serverMsg);
+
+      // 推送失败时重试一次 (用户可能正在重连)
+      if (!delivered) {
+        setTimeout(() => {
+          const retryOk = connectionManager.sendToUser(String(target_user_id), serverMsg);
+          logger.info({ target: target_user_id, retryOk }, "PushUpdate retry result");
+        }, 1500);
+      }
 
       return {
         error_code: 0,
@@ -149,9 +162,9 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: PushToUsersReq }>(
     `${SERVICE_PATH}/PushToUsers`,
     async (request) => {
-      const { target_user_ids, update, push_id } = request.body;
+      const target_user_ids = (request.body as any).target_user_ids ?? (request.body as any).targetUserIds;
+      const { update, push_id } = request.body as any;
 
-      // 幂等去重
       if (push_id && connectionManager.isDuplicatePush(push_id)) {
         return {
           error_code: 0,
@@ -162,10 +175,8 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
         } as PushToUsersResp;
       }
 
-      const serverMsg = buildUpdate(
-        update.type,
-        update.payload ?? {}
-      );
+      const { type: _t, ...data } = update as Record<string, unknown>;
+      const serverMsg = buildUpdate((update as any).type || 0, data);
       const [delivered, missed] = connectionManager.sendToUsers(
         target_user_ids,
         serverMsg
@@ -190,6 +201,13 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
       const msg = message ?? getDefaultKickMessage(reason);
       const kicked = connectionManager.kickUser(user_id, reason, msg);
 
+      // 同步删除 Redis 在线状态
+      if (kicked) {
+        gatewayRedis.setUserOffline(user_id as any).catch((err) =>
+          logger.error({ err, userId: user_id }, "Failed to sync offline to Redis")
+        );
+      }
+
       return {
         error_code: 0,
         error_message: "",
@@ -198,34 +216,78 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  // ===== IsUserOnline — 在线探测 =====
+  // ===== IsUserOnline — 全局在线探测 (Phase 2.3 升级) =====
   app.post<{ Body: IsUserOnlineReq }>(
     `${SERVICE_PATH}/IsUserOnline`,
     async (request) => {
       const { user_id } = request.body;
-      const is_online = connectionManager.isOnline(user_id);
 
+      // 1. 先查本地 ConnectionManager (最快)
+      if (connectionManager.isOnline(user_id)) {
+        return {
+          error_code: 0,
+          error_message: "",
+          is_online: true,
+          last_seen_at: Date.now(),
+        } as IsUserOnlineResp;
+      }
+
+      // 2. 查询 Redis 在线路由表 (用户在另一个网关?)
+      if (gatewayRedis.connected) {
+        const entry = await gatewayRedis.isUserOnline(user_id);
+        if (entry) {
+          return {
+            error_code: 0,
+            error_message: "",
+            is_online: true,
+            last_seen_at: entry.last_heartbeat,
+          } as IsUserOnlineResp;
+        }
+      }
+
+      // 3. 不在线
       return {
         error_code: 0,
         error_message: "",
-        is_online,
-        last_seen_at: 0, // Phase 2: 从 Redis 获取精确值
+        is_online: false,
+        last_seen_at: 0,
       } as IsUserOnlineResp;
     }
   );
 
-  // ===== BatchOnlineCheck — 批量在线检查 =====
+  // ===== BatchOnlineCheck — 批量全局在线检查 (Phase 2.3 升级) =====
   app.post<{ Body: BatchOnlineCheckReq }>(
     `${SERVICE_PATH}/BatchOnlineCheck`,
     async (request) => {
       const { user_ids } = request.body;
-      const online: number[] = [];
-      const offline: number[] = [];
 
+      const online: string[] = [];
+      const offline: string[] = [];
+      const needRedisCheck: string[] = [];
+
+      // 1. 先查本地
       for (const userId of user_ids) {
         if (connectionManager.isOnline(userId)) {
-          online.push(userId);
+          online.push(String(userId));
         } else {
+          needRedisCheck.push(userId);
+        }
+      }
+
+      // 2. 本地不在线的，查 Redis
+      if (needRedisCheck.length > 0 && gatewayRedis.connected) {
+        const result = await gatewayRedis.batchCheckOnline(needRedisCheck as any);
+        for (const [userId] of result.online) {
+          online.push(String(userId));
+        }
+        for (const userId of needRedisCheck) {
+          if (!online.includes(userId)) {
+            offline.push(userId);
+          }
+        }
+      } else {
+        // Redis 不可用, 本地不在线就算离线
+        for (const userId of needRedisCheck) {
           offline.push(userId);
         }
       }
@@ -239,7 +301,7 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
-  // ===== NotifyGateway — 事件通知 (网关间 / 服务间) =====
+  // ===== NotifyGateway — 事件通知 =====
   app.post<{ Body: NotifyGatewayReq }>(
     `${SERVICE_PATH}/NotifyGateway`,
     async (request) => {
@@ -247,11 +309,24 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
 
       logger.info({ event, user_id }, "Gateway notification received");
 
-      // Phase 2: 根据事件类型执行不同逻辑
-      //   GATEWAY_USER_ONLINE   → 来自其他网关的用户上线广播
-      //   GATEWAY_USER_OFFLINE  → 用户下线
-      //   GATEWAY_CONFIG_RELOAD → 重载配置
-      //   GATEWAY_CLEAR_SESSION → 清除用户本地会话
+      // Phase 2.3: GATEWAY_USER_ONLINE / GATEWAY_USER_OFFLINE
+      // 来自其他网关的上/下线广播 — 可选的跨网关缓存预热
+      // 当前实现: 不缓存远程用户的在线状态, 每次通过 Redis 实时查询
+
+      switch (event) {
+        case 0: // GATEWAY_USER_ONLINE
+          logger.debug({ user_id }, "Remote user online (from another gateway)");
+          break;
+        case 1: // GATEWAY_USER_OFFLINE
+          logger.debug({ user_id }, "Remote user offline (from another gateway)");
+          break;
+        case 2: // GATEWAY_CONFIG_RELOAD
+          logger.info("Config reload notification received");
+          break;
+        case 3: // GATEWAY_CLEAR_SESSION
+          logger.info({ user_id }, "Session clear notification");
+          break;
+      }
 
       return {
         error_code: 0,

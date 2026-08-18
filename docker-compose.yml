@@ -1,23 +1,78 @@
 # =============================================================================
-# NovaChat — 开发环境 Docker Compose 编排
+# NovaChat — Docker Compose 编排 (Phase 2.3)
 #
-# 启动:
-#   docker-compose up -d            # 后台启动全部服务
-#   docker-compose up --build       # 重建镜像并启动
-#   docker-compose logs -f          # 查看日志
-#   docker-compose down             # 停止并清理
+# 启动全部服务:
+#   docker compose up -d                    # 后台启动
+#   docker compose up --build               # 重建镜像后启动
+#   docker compose logs -f <service>        # 查看指定服务日志
+#   docker compose down                     # 停止并清理
+#   docker compose down -v                  # 停止并清理数据卷
 #
-# 服务:
-#   user-service    C++ bRPC 用户服务 (port 8001)
-#   gateway         TS Fastify 网关   (port 3000)
+# 单独启动:
+#   docker compose up -d mysql redis        # 只启动数据库
+#   docker compose up --build user-service  # 重建并启动 user-service
 #
-# Phase 2 将加入: message-service, redis, mysql
+# 服务清单:
+#   mysql          — MySQL 8.0 (用户+消息持久化)
+#   redis          — Redis 7   (Session 缓存 + 在线路由表)
+#   user-service   — C++ bRPC 用户服务 (:8001)
+#   gateway        — TS Fastify 网关   (:3000)
 # =============================================================================
 
 version: "3.8"
 
 services:
-  # ===== C++ User Service =====
+  # ===========================================================================
+  # MySQL 8.0 — 用户数据 + 消息持久化
+  # ===========================================================================
+  mysql:
+    image: mysql:8.0
+    container_name: novachat-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: novachat_dev
+      MYSQL_DATABASE: novachat
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      # 启动时自动建表
+      - ./scripts/docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # 数据持久化
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pnovachat_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    networks:
+      - novachat-net
+
+  # ===========================================================================
+  # Redis 7 — Session 缓存 + 全局在线路由表
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: novachat-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+    networks:
+      - novachat-net
+
+  # ===========================================================================
+  # C++ User Service (bRPC)
+  # ===========================================================================
   user-service:
     build:
       context: .
@@ -31,6 +86,26 @@ services:
       - "--port=8001"
       - "--listen_addr=0.0.0.0"
       - "--worker_id=1"
+      # Phase 2.2: 启用 MySQL + Redis 持久化
+      - "--enable_mysql"
+      - "--enable_redis"
+      - "--mysql_addr=mysql"
+      - "--mysql_port=3306"
+      - "--mysql_user=root"
+      - "--mysql_passwd=novachat_dev"
+      - "--mysql_db=novachat"
+      - "--mysql_pool_size=8"
+      - "--redis_addr=redis"
+      - "--redis_port=6379"
+      - "--redis_passwd="
+      - "--log_dir=/tmp"
+      - "--minloglevel=0"
+      - "--v=0"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - novachat-net
@@ -41,7 +116,48 @@ services:
       retries: 3
       start_period: 5s
 
-  # ===== TS Gateway =====
+  # ===========================================================================
+  # C++ Message Service (bRPC)
+  # ===========================================================================
+  message-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: novachat-user-service:latest
+    container_name: novachat-message-service
+    ports:
+      - "8002:8002"
+    entrypoint: ["./nova_message_service"]
+    command:
+      - "--flagfile=conf/message_service.flags"
+      - "--port=8002"
+      - "--listen_addr=0.0.0.0"
+      - "--worker_id=2"
+      - "--enable_redis"
+      - "--redis_addr=redis"
+      - "--redis_port=6379"
+      - "--redis_passwd="
+      - "--log_dir=/tmp"
+      - "--minloglevel=0"
+      - "--v=0"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - novachat-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # ===========================================================================
+  # TS Gateway (Fastify + WebSocket)
+  # ===========================================================================
   gateway:
     build:
       context: ./gateway
@@ -54,13 +170,34 @@ services:
       - NODE_ENV=production
       - GATEWAY_PORT=3000
       - GATEWAY_HOST=0.0.0.0
+      # 本网关外部可达地址 (在 Docker 网络内)
+      - GATEWAY_ADDR=gateway:3000
+      - WORKER_ID=1
+      # 后端 C++ 服务
       - USER_SERVICE_URL=http://user-service:8001
       - MESSAGE_SERVICE_URL=http://message-service:8002
+      # JWT
       - JWT_SECRET=novachat-docker-dev-secret
       - JWT_EXPIRES_IN=24h
-      - WORKER_ID=1
+      # Phase 2.3: Redis 在线路由表
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=
+      - REDIS_ONLINE_TTL=30
+      - ONLINE_HEARTBEAT_INTERVAL=15
+      # WebSocket
+      - WS_MAX_CONNECTIONS=50000
+      - WS_HEARTBEAT_INTERVAL=30
+      - WS_CONNECTION_TIMEOUT=60
+      # 限流
+      - RATE_LIMIT_PER_USER=100
+      - RATE_LIMIT_PER_IP=200
+      # Session
+      - SESSION_EXPIRES_IN=7d
+      - SESSION_CLEANUP_INTERVAL=300000
     depends_on:
       user-service:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -72,6 +209,33 @@ services:
       retries: 3
       start_period: 10s
 
+# =============================================================================
+# 网络 & 数据卷
+  # ===========================================================================
+  # Web Frontend (Nginx + Static)
+  # ===========================================================================
+  web:
+    image: nginx:alpine
+    container_name: novachat-web
+    ports:
+      - "80:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./web/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    networks:
+      - novachat-net
+
+# =============================================================================
+
 networks:
   novachat-net:
     driver: bridge
+
+volumes:
+  mysql-data:
+    driver: local
+  redis-data:
+    driver: local

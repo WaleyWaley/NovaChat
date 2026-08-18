@@ -92,14 +92,14 @@ public:
 
     void SearchUsers(::google::protobuf::RpcController* controller,
                      const ::nova::user::SearchUsersReq* request,
-                     const ::nova::user::SearchUsersResp* response,
+                     ::nova::user::SearchUsersResp* response,
                      ::google::protobuf::Closure* done) override;
 
     // ==================== 账户管理 ====================
 
     void DeleteAccount(::google::protobuf::RpcController* controller,
                        const ::nova::user::DeleteAccountReq* request,
-                       const ::nova::user::DeleteAccountResp* response,
+                       ::nova::user::DeleteAccountResp* response,
                        ::google::protobuf::Closure* done) override;
 
 private:

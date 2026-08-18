@@ -30,6 +30,7 @@ declare module "fastify" {
 /** 完全不需要认证的路由 */
 const NO_AUTH_ROUTES = [
   "/health",
+  "/ws",                        // WebSocket (JWT 在首条消息中验证)
   "/nova.gateway.PushService/", // C++ 服务内部调用
   "/api/auth/register",
   "/api/auth/login",

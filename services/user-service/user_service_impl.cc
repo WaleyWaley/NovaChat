@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "nova/logger.h"
+#include "nova/password.h"
 
 namespace nova {
 namespace user {
@@ -95,18 +96,6 @@ void FillUserProfile(const UserRecord& record,
     profile->set_is_verified(false);  // Phase 3+
 }
 
-// 简单密码哈希 (Phase 1: 明文 + 前缀; Phase 2: bcrypt)
-std::string HashPassword(const std::string& password) {
-    // TODO(Phase 2): bcrypt::generateHash(password, 12)
-    return "hash:" + password;
-}
-
-// 验证密码
-bool CheckPassword(const std::string& password, const std::string& hash) {
-    // TODO(Phase 2): bcrypt::validatePassword(password, hash)
-    return hash == "hash:" + password;
-}
-
 }  // anonymous namespace
 
 // ============================= 1. Register ====================================
@@ -155,7 +144,7 @@ void UserServiceImpl::Register(::google::protobuf::RpcController* controller,
     // --- 创建用户 ---
     int64_t user_id = snowflake_->NextId();
     int64_t now = nova::NowMs();
-    std::string password_hash = HashPassword(request->password());
+    std::string password_hash = nova::HashPassword(request->password());
 
     auto record = user_dao_->CreateUser(
         request->username(), password_hash,
@@ -216,7 +205,7 @@ void UserServiceImpl::Login(::google::protobuf::RpcController* controller,
     }
 
     // --- 验证密码 ---
-    if (!CheckPassword(request->password(), record->password_hash)) {
+    if (!nova::CheckPassword(request->password(), record->password_hash)) {
         response->set_error_code(::nova::common::PASSWORD_INVALID);
         response->set_error_message("Invalid password");
         return;
@@ -547,14 +536,14 @@ void UserServiceImpl::ChangePassword(::google::protobuf::RpcController* controll
         response->set_error_message("User not found");
         return;
     }
-    if (!CheckPassword(request->old_password(), record->password_hash)) {
+    if (!nova::CheckPassword(request->old_password(), record->password_hash)) {
         response->set_error_code(::nova::common::PASSWORD_INVALID);
         response->set_error_message("Old password is incorrect");
         return;
     }
 
     // --- 更新密码 ---
-    std::string new_hash = HashPassword(request->new_password());
+    std::string new_hash = nova::HashPassword(request->new_password());
     if (!user_dao_->ChangePassword(request->user_id(), new_hash, nova::NowMs())) {
         response->set_error_code(::nova::common::INTERNAL_ERROR);
         response->set_error_message("Failed to change password");
@@ -578,8 +567,8 @@ void UserServiceImpl::SearchUsers(::google::protobuf::RpcController* controller,
                                   ::google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
 
-    NOVA_VLOG(1) << "SearchUsers query=" << request->query()
-                 << " limit=" << request->limit();
+    NOVA_LOG_INFO << "SearchUsers query=" << request->query()
+                  << " limit=" << request->limit();
 
     // --- 参数校验 ---
     if (request->query().empty()) {
@@ -601,10 +590,12 @@ void UserServiceImpl::SearchUsers(::google::protobuf::RpcController* controller,
     for (const auto& record : records) {
         auto* profile = response->add_users();
         FillUserProfile(record, profile);
-        profile->clear_phone();  // 搜索结果不暴露手机号
+        profile->clear_phone();
     }
     response->set_has_more(
         static_cast<int32_t>(records.size()) >= limit);
+
+    NOVA_LOG_INFO << "SearchUsers found " << records.size() << " users";
 }
 
 // ============================= 12. DeleteAccount ==============================
@@ -625,7 +616,7 @@ void UserServiceImpl::DeleteAccount(::google::protobuf::RpcController* controlle
         response->set_error_message("User not found");
         return;
     }
-    if (!CheckPassword(request->password(), record->password_hash)) {
+    if (!nova::CheckPassword(request->password(), record->password_hash)) {
         response->set_error_code(::nova::common::PASSWORD_INVALID);
         response->set_error_message("Password incorrect");
         return;

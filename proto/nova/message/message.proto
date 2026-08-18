@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package nova.message;
+
+import "nova/common/common.proto";
+
+// =============================================================================
+// NovaChat — MessageService RPC 定义 (Phase 3: ACK + 去重 + Timeline)
+// =============================================================================
+
+// ============================= SendMessage ===================================
+
+message SendMessageReq {
+    nova.common.Peer from_peer       = 1;
+    nova.common.Peer to_peer         = 2;
+    nova.common.MessageType msg_type = 3;
+    string text                       = 4;
+    int64  reply_to_msg_id            = 5;
+    bool   is_silent                  = 6;
+    // Phase 3: 幂等键 (客户端生成, 防止重试导致重复消息)
+    string idempotency_key            = 7;
+}
+
+message SendMessageResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    nova.common.Message   message       = 3;
+    // Phase 3: false 表示此 idempotency_key 已处理过 (重复请求)
+    bool                  is_new        = 4;
+}
+
+// ============================= GetMessages ===================================
+
+message GetMessagesReq {
+    nova.common.Peer peer         = 1;
+    int32  limit                  = 2;  // max 100
+    int64  offset_id              = 3;  // 0 = 最新
+    bool   load_newer             = 4;
+}
+
+message GetMessagesResp {
+    nova.common.ErrorCode error_code       = 1;
+    string                error_message    = 2;
+    repeated nova.common.Message messages  = 3;
+    bool                  has_more         = 4;
+    int64                 next_offset_id   = 5;
+}
+
+// ============================= AckMessage (Phase 3) ==========================
+// 客户端确认消息已送达/已读
+
+message AckMessageReq {
+    int64  user_id                  = 1;
+    nova.common.Peer peer           = 2;  // 哪个对话
+    int64  max_ack_msg_id           = 3;  // 确认此 ID 及之前所有消息
+    nova.common.MessageStatus status = 4;  // DELIVERED or READ
+}
+
+message AckMessageResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+}
+
+// ============================= GetSyncState (Phase 3) ========================
+// 用户上线时拉取同步状态 — 判断哪些对话有新消息
+
+message GetSyncStateReq {
+    int64 user_id = 1;
+    // 每个对话的最后已知 message_id (客户端本地状态)
+    repeated nova.common.SyncState peer_states = 2;
+}
+
+message GetSyncStateResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    // 每个对话在当前服务器端的最新 message_id
+    repeated nova.common.SyncState updated_states = 3;
+}
+
+// ============================= Service =======================================
+
+service MessageService {
+    rpc SendMessage    (SendMessageReq)    returns (SendMessageResp);
+    rpc GetMessages    (GetMessagesReq)    returns (GetMessagesResp);
+    // Phase 3
+    rpc AckMessage     (AckMessageReq)     returns (AckMessageResp);
+    rpc GetSyncState   (GetSyncStateReq)   returns (GetSyncStateResp);
+}

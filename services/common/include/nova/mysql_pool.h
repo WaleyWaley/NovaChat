@@ -1,16 +1,21 @@
 #pragma once
 
 // =============================================================================
-// NovaChat — MySQL 连接池 (基于 brpc::Channel)
+// NovaChat — MySQL 连接池 (Phase 3: libmysqlclient + 线程池)
 //
-// 方案: 多个 brpc::Channel 实例组成的连接池, 轮询分发请求
+// 设计要点:
+//   - bthread 是用户态协程, libmysqlclient 的 mysql_real_query() 是同步阻塞的
+//   - 如果在 bthread 中直接调用, 会阻塞整个 pthread (影响所有同线程 bthread)
+//   - 解决: 连接池 + 专用 pthread 线程池
+//     - bthread 将 SQL 提交到任务队列后, CountdownEvent::wait() 挂起自身
+//     - 专用 pthread 执行 mysql_real_query() (阻塞不影响 bthread 调度)
+//     - 执行完毕后 signal() 唤醒 bthread, 返回结果
 //
-// bRPC 的 MySQL 协议支持:
-//   brpc::Channel 以 brpc::PROTOCOL_MYSQL 初始化后, 可直接发送 SQL 文本.
-//   底层自动复用连接 + bthread 非阻塞 I/O.
-//
-// Phase 1: 搭建池化框架 + 接口占位
-// Phase 2: 在 user_dao / message_dao 中实际写 SQL 交互
+// 使用:
+//   MySqlPool pool;
+//   pool.Init("127.0.0.1", 3306, "root", "pass", "novachat", 8);
+//   pool.Execute("INSERT INTO users VALUES (...)");        // 写操作
+//   pool.QueryAll("SELECT * FROM users", &rows);          // 读操作
 // =============================================================================
 
 #include <vector>
@@ -18,58 +23,84 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <map>
 
-#include <brpc/channel.h>
 #include <butil/status.h>
+#include <bthread/countdown_event.h>
+#include <mysql/mysql.h>
 
 namespace nova {
 
-// 简化的结果行: 列名 → 值 (字符串)
 using Row = std::map<std::string, std::string>;
 
 class MySqlPool {
 public:
     MySqlPool() = default;
-    ~MySqlPool() = default;
+    ~MySqlPool();
 
     MySqlPool(const MySqlPool&) = delete;
     MySqlPool& operator=(const MySqlPool&) = delete;
 
     // 初始化连接池
-    // addr:       MySQL 地址 (IP 或域名)
-    // port:       MySQL 端口 (默认 3306)
-    // user:       用户名
-    // passwd:     密码
-    // db:         数据库名
-    // pool_size:  连接池大小 (默认 8)
+    // pool_size: MySQL 连接数 = 专用 pthread 数
     bool Init(const std::string& addr, int port,
               const std::string& user, const std::string& passwd,
               const std::string& db, int pool_size = 8);
 
     // 执行写操作 (INSERT / UPDATE / DELETE)
-    // 返回: OK 表示成功, 否则携带错误信息
     butil::Status Execute(const std::string& sql);
 
     // 执行查询 (SELECT)
-    // row_cb: 每行结果回调 (在 bthread 上下文中调用, 注意线程安全)
+    // row_cb: 每行结果回调
     butil::Status Query(const std::string& sql,
                         std::function<void(const Row&)> row_cb);
 
     // 查询并返回所有行
     butil::Status QueryAll(const std::string& sql, std::vector<Row>* rows);
 
-    // 连接池是否已初始化
     bool IsReady() const { return ready_; }
-
-    // 获取数据库名
     const std::string& Database() const { return db_; }
 
 private:
-    brpc::Channel* PickChannel();  // Round-robin 选择一个 Channel
+    // 任务定义
+    struct Task {
+        std::string sql;
+        bool is_query;
+        butil::Status* result;
+        bthread::CountdownEvent* done;
+        // 查询结果
+        std::vector<Row>* rows;           // QueryAll 用
+        std::function<void(const Row&)>* row_cb;  // Query 回调
+        std::mutex* cb_mutex;             // 回调线程安全锁
+    };
 
-    std::vector<std::unique_ptr<brpc::Channel>> channels_;
-    size_t pool_size_ = 0;
-    std::atomic<size_t> rr_idx_{0};
+    // 获取一个空闲连接 (阻塞直到有可用连接)
+    MYSQL* AcquireConnection();
+    void ReleaseConnection(MYSQL* conn);
+
+    // 工作线程: 从队列取任务, 执行同步 MySQL 调用, 完成后唤醒 bthread
+    void WorkerThread(int worker_id);
+
+    // 连接管理
+    struct ConnEntry {
+        MYSQL* mysql;
+        bool in_use = false;
+    };
+    std::vector<ConnEntry> connections_;
+    std::mutex conn_mu_;
+    std::condition_variable conn_cv_;
+
+    // 任务队列 + 线程池
+    std::queue<Task> task_queue_;
+    std::mutex queue_mu_;
+    std::condition_variable queue_cv_;
+    std::vector<std::thread> workers_;
+    std::atomic<bool> running_{true};
+
     std::string db_;
     bool ready_ = false;
 };

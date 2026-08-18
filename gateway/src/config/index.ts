@@ -14,6 +14,10 @@ export interface GatewayConfig {
   // 本网关节点的唯一 ID (用于 Snowflake worker_id 和日志标识)
   WORKER_ID: number;
 
+  // 本网关节点的外部可访问地址 (C++ 服务通过此地址回连网关)
+  // 格式: "10.0.1.5:3000" 或 "gateway-1.novachat.internal:3000"
+  GATEWAY_ADDR: string;
+
   // C++ 后端服务地址 (Phase 1: 配置文件硬编码; Phase 3: Consul/Etcd)
   USER_SERVICE_URL: string;
   MESSAGE_SERVICE_URL: string;
@@ -41,6 +45,14 @@ export interface GatewayConfig {
   // Phase 2.1: Session 管理
   SESSION_EXPIRES_IN: string;       // Session TTL，如 "7d"
   SESSION_CLEANUP_INTERVAL: number; // 清理间隔 ms (默认 300000 = 5min)
+
+  // Phase 2.3: Redis 在线路由表
+  REDIS_ADDR: string; // Redis 地址 (host:port)
+  REDIS_PASSWORD: string; // Redis 密码 (可选)
+  REDIS_ONLINE_TTL: number; // 在线路由表 TTL (秒, 默认 30)
+
+  // Phase 2.3: 在线状态心跳刷新间隔 (秒, 默认 15)
+  ONLINE_HEARTBEAT_INTERVAL: number;
 }
 
 function loadConfig(): GatewayConfig {
@@ -50,6 +62,8 @@ function loadConfig(): GatewayConfig {
     NODE_ENV: process.env.NODE_ENV || "development",
 
     WORKER_ID: parseInt(process.env.WORKER_ID || "1", 10),
+
+    GATEWAY_ADDR: process.env.GATEWAY_ADDR || `127.0.0.1:${process.env.GATEWAY_PORT || "3000"}`,
 
     USER_SERVICE_URL: process.env.USER_SERVICE_URL || "http://127.0.0.1:8001",
     MESSAGE_SERVICE_URL: process.env.MESSAGE_SERVICE_URL || "http://127.0.0.1:8002",
@@ -74,6 +88,12 @@ function loadConfig(): GatewayConfig {
       process.env.SESSION_CLEANUP_INTERVAL || "300000",
       10
     ),
+
+    // Phase 2.3: Redis 在线路由表
+    REDIS_ADDR: process.env.REDIS_ADDR || "127.0.0.1:6379",
+    REDIS_PASSWORD: process.env.REDIS_PASSWORD || "",
+    REDIS_ONLINE_TTL: parseInt(process.env.REDIS_ONLINE_TTL || "30", 10),
+    ONLINE_HEARTBEAT_INTERVAL: parseInt(process.env.ONLINE_HEARTBEAT_INTERVAL || "15", 10),
   };
 }
 

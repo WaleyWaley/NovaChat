@@ -23,6 +23,8 @@ import { healthRoutes } from "./routes/health.js";
 import { pushRoutes } from "./routes/push.js";
 import { userRoutes } from "./routes/user.js";
 import { connectionManager } from "./ws/connection.js";
+import { onlineRegistry } from "./ws/online_registry.js";
+import { gatewayRedis } from "./redis/client.js";
 import { signToken, verifyAccessToken } from "./auth/jwt.js";
 import { sessionStore } from "./auth/session.js";
 import {
@@ -32,6 +34,8 @@ import {
   buildError,
   buildPong,
   buildRpcResult,
+  buildCallSignal,
+  buildRoomSignal,
   type ClientMessage,
   type ClientAuthMessage,
   type ClientPingMessage,
@@ -39,8 +43,12 @@ import {
   type ClientSendMessage,
   type ClientTypingMessage,
   type ClientReadReceiptMessage,
+  type ClientCallSignal,
+  type ClientRoomSignal,
 } from "./ws/protocol.js";
 import { userClient } from "./clients/user_client.js";
+import { messageClient } from "./clients/message_client.js";
+import { roomManager } from "./ws/room_manager.js";
 import type { WebSocket } from "ws";
 import type { FastifyRequest } from "fastify";
 
@@ -140,13 +148,22 @@ async function createApp() {
             handlePing(clientMsg as ClientPingMessage, socket);
             break;
           case "send_msg":
-            handleSendMessage(clientMsg as ClientSendMessage);
+            handleSendMessage(clientMsg as ClientSendMessage).catch((err) => {
+              logger.error({ err }, "send_msg handler error");
+              socket.send(JSON.stringify(buildRpcResult(clientMsg.seq, 5001, "Internal error", null)));
+            });
             break;
           case "typing":
             handleTyping(clientMsg as ClientTypingMessage);
             break;
           case "read":
             handleReadReceipt(clientMsg as ClientReadReceiptMessage);
+            break;
+          case "call_signal":
+            handleCallSignal(clientMsg as ClientCallSignal);
+            break;
+          case "room_signal":
+            handleRoomSignal(clientMsg as ClientRoomSignal);
             break;
           case "rpc":
             handleRpc(clientMsg as ClientRpcMessage, socket).catch((err) => {
@@ -176,7 +193,10 @@ async function createApp() {
       socket.on("close", (_code: number, _reason: Buffer) => {
         if (authenticated && currentUserId !== null) {
           connectionManager.unregister(socket);
-          // Phase 2.2: 通知 Redis 用户下线
+          // Phase 2.3: 通知 Redis 删除在线状态
+          onlineRegistry.onUserOffline(currentUserId).catch((err) => {
+            logger.error({ err, userId: currentUserId }, "Failed to unregister online status");
+          });
         }
         logger.info(
           {
@@ -275,8 +295,10 @@ async function createApp() {
           "User authenticated via WebSocket"
         );
 
-        // Phase 2.2: 向 Redis 注册在线状态
-        // Phase 2.2: 广播上线通知 (NotifyGateway → 其他网关)
+        // Phase 2.3: 向 Redis 注册在线状态 → 全局路由表
+        onlineRegistry.onUserOnline(payload.user_id, payload.username).catch((err) => {
+          logger.error({ err, userId: payload.user_id }, "Failed to register online status");
+        });
 
         ws.send(
           JSON.stringify(
@@ -292,28 +314,112 @@ async function createApp() {
         ws.send(JSON.stringify(buildPong(msg.seq)));
       }
 
-      function handleSendMessage(msg: ClientSendMessage): void {
-        // Phase 1.7: 仅记录，Phase 2 转发到 message-service
+      async function handleSendMessage(msg: ClientSendMessage): Promise<void> {
         if (!currentUserId) return;
 
         logger.info(
-          {
-            from: currentUserId,
-            to: msg.payload.peer_id,
-            type: msg.payload.peer_type,
-          },
-          "Message received (Phase 2 will forward to message-service)"
+          { from: currentUserId, to: msg.payload.peer_id },
+          "Forwarding message to message-service"
         );
 
-        // 回一个临时确认
-        socket.send(
-          JSON.stringify(
-            buildRpcResult(msg.seq, 0, "", {
-              status: "received",
-              phase: "Message forwarding not yet implemented (Phase 2)",
-            })
-          )
-        );
+        try {
+          const result = await messageClient.sendMessage({
+            from_peer: { type: 1, id: currentUserId },
+            to_peer: { type: msg.payload.peer_type, id: msg.payload.peer_id },
+            msg_type: msg.payload.msg_type ?? 0,
+            text: msg.payload.text,
+            reply_to_msg_id: msg.payload.reply_to_msg_id,
+          });
+
+          // proto3 omits error_code=0 from JSON, so it may be undefined
+          if (result.error_code && result.error_code !== 0) {
+            socket.send(
+              JSON.stringify(
+                buildRpcResult(msg.seq, result.error_code, result.error_message || '', null)
+              )
+            );
+            return;
+          }
+
+          // 回确认给发送者 (消息已存储, message_id 已生成)
+          const confirmMsg = buildRpcResult(msg.seq, 0, "", {
+            message_id: result.message?.message_id,
+            status: "sent",
+          });
+          logger.info({ seq: msg.seq, msgId: result.message?.message_id }, "Sending rpc_result confirmation");
+          socket.send(JSON.stringify(confirmMsg));
+        } catch (err) {
+          logger.error({ err }, "Failed to send message via message-service");
+          socket.send(
+            JSON.stringify(
+              buildRpcResult(msg.seq, 5001, "Failed to send message", null)
+            )
+          );
+        }
+      }
+
+      function handleRoomSignal(msg: ClientRoomSignal): void {
+        if (!authenticated) return;
+        const { action, room_id, invite_user_ids, webrtc } = msg.payload;
+        const uid = String(currentUserId!);
+        const uname = currentUsername;
+
+        if (action === "create") {
+          const rid = roomManager.createRoom(uid, uname);
+          socket.send(JSON.stringify(buildRoomSignal({ action: "created", room_id: rid, participants: [{ userId: uid, username: uname }] })));
+          logger.info({ roomId: rid, userId: uid }, "Room created");
+        } else if (action === "join") {
+          const others = roomManager.joinRoom(room_id!, uid, uname);
+          if (!others) { socket.send(JSON.stringify(buildError(msg.seq, 1202, "Room not found"))); return; }
+          // 通知房间内其他人: 新成员加入
+          const room = roomManager.getRoom(room_id!);
+          for (const p of others) {
+            const ws = connectionManager.getByUserId(p.userId);
+            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "user_joined", room_id, from_user_id: uid, from_username: uname, participants: room?.participants })));
+          }
+          // 告知加入者完整列表
+          socket.send(JSON.stringify(buildRoomSignal({ action: "joined", room_id, participants: room?.participants || [] })));
+        } else if (action === "leave") {
+          const result = roomManager.leaveRoom(uid);
+          if (!result) return;
+          if (result.remaining.length === 0) return;
+          const room = roomManager.getRoom(result.roomId);
+          for (const p of result.remaining) {
+            const ws = connectionManager.getByUserId(p.userId);
+            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "user_left", room_id: result.roomId, from_user_id: uid, from_username: uname, participants: room?.participants })));
+          }
+        } else if (action === "invite") {
+          if (!invite_user_ids) return;
+          const room = roomManager.getUserRoom(uid);
+          if (!room) { socket.send(JSON.stringify(buildError(msg.seq, 1202, "You are not in a room"))); return; }
+          for (const targetId of invite_user_ids) {
+            const ws = connectionManager.getByUserId(String(targetId));
+            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "invited", room_id: room.roomId, from_user_id: uid, from_username: uname })));
+          }
+        } else if (action === "webrtc" && webrtc) {
+          // Mesh 模式: 转发 WebRTC 信令到房间内所有其他人
+          const room = roomManager.getUserRoom(uid);
+          if (!room) return;
+          for (const p of room.participants) {
+            if (p.userId === uid) continue;
+            const ws = connectionManager.getByUserId(p.userId);
+            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "webrtc", from_user_id: uid, from_username: uname, webrtc: { ...webrtc, from_user_id: uid, from_username: uname } })));
+          }
+        }
+      }
+
+      function handleCallSignal(msg: ClientCallSignal): void {
+        if (!authenticated) return;
+        const { signal_type, to_user_id, data } = msg.payload;
+        const targetWs = connectionManager.getByUserId(String(to_user_id));
+        if (!targetWs) {
+          socket.send(JSON.stringify(buildError(msg.seq, 1101, "User not online")));
+          return;
+        }
+        // 转发信令给目标用户
+        const forward = buildCallSignal(signal_type, currentUserId!, currentUsername, data);
+        targetWs.send(JSON.stringify(forward));
+        logger.info({ signal_type, from: currentUserId, to: to_user_id }, "Call signal relayed");
       }
 
       function handleTyping(msg: ClientTypingMessage): void {
@@ -457,6 +563,12 @@ async function proxyUserService(
 async function main(): Promise<void> {
   const app = await createApp();
 
+  // ---- Phase 2.3: 初始化 Redis 在线路由表 ----
+  const redisOk = await gatewayRedis.connect();
+  if (!redisOk) {
+    logger.warn("Redis not available, cross-gateway online queries disabled");
+  }
+
   // 启动 HTTP 服务器
   try {
     await app.listen({
@@ -470,12 +582,19 @@ async function main(): Promise<void> {
         host: config.HOST,
         env: config.NODE_ENV,
         workerId: config.WORKER_ID,
+        gatewayAddr: config.GATEWAY_ADDR,
+        redis: redisOk ? "connected" : "unavailable",
       },
       "🚀 NovaChat Gateway started"
     );
 
-    // 启动心跳检测
+    // 启动本地心跳检测
     connectionManager.startHeartbeat();
+
+    // Phase 2.3: 启动 Redis 在线路由表心跳刷新
+    if (redisOk) {
+      onlineRegistry.startHeartbeat();
+    }
 
     // Phase 2.1: 启动 session 清理定时器
     sessionStore.startCleanupTimer();
@@ -489,7 +608,13 @@ async function main(): Promise<void> {
     logger.info({ signal }, "Shutting down...");
 
     connectionManager.stopHeartbeat();
+    onlineRegistry.stopHeartbeat();
     sessionStore.stopCleanupTimer();
+
+    // Phase 2.3: 清除 Redis 中本网关的所有在线用户
+    await onlineRegistry.shutdown();
+    await gatewayRedis.disconnect();
+
     connectionManager.disconnectAll("Server shutting down");
 
     try {

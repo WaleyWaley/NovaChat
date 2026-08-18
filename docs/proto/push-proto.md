@@ -9,7 +9,7 @@
 PushService 共定义 **6 个 RPC 方法**：
 
 **1. PushUpdate（单用户推送）**
-最核心的接口。C++ 服务通过 Redis 路由表查询用户所在的网关节点，然后调用此 RPC 将 `Update` 推送给指定用户。关键字段：
+最核心的接口。C++ 服务将 `Update` 推送给指定用户。当前实现采用简化策略：message-service 的 PushDispatcher 不查 Redis 在线路由表，直接向网关发送推送请求，由网关 PushService 自己判断用户是否在线。关键字段：
 - `skip_offline`：为 true 时（如 Typing 指示器）用户不在线直接丢弃；为 false 时（如消息）调用方会进行离线存储。
 - `push_id`：调用方生成的 Snowflake 幂等键，网关用于去重，防止 bRPC 重试导致重复推送。
 - `ttl_seconds`：推送存活时间，超时后不再推送。

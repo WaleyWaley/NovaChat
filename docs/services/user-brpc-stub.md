@@ -22,11 +22,7 @@
 
 ### 为什么以手写替代代码生成
 
-Phase 1 阶段项目尚处于快速原型验证期，完整的 protoc 代码生成链路可能还未打通，手写基类可以：
-
-- 消除对代码生成工具的依赖，加速开发迭代
-- 精准控制需要暴露的方法集合
-- 为 Phase 2 切换到自动生成版本预留完全兼容的接口
+Phase 1 阶段项目使用手写基类，规避 protoc-gen-brpc 的 Docker 环境兼容性问题。手写 stubs (~200 行) 可控、可调试，通过动态 DescriptorPool 保证与 bRPC 框架的兼容。Phase 2 已接入 proto-gen.sh 生成 message-service 的 brpc stubs，user-service 继续使用手写版本
 
 ## 业务角色
 
@@ -37,4 +33,4 @@ Phase 1 阶段项目尚处于快速原型验证期，完整的 protoc 代码生�
 - **上游框架**：`google::protobuf::Service` 提供基础的 RPC 反射机制，`brpc/server.h` 负责将网络请求路由到这里
 - **下游实现**：`UserServiceImpl`（`user_service_impl.h`）继承 `UserServiceBase` 并提供 12 个方法的具体业务逻辑
 - **协议依赖**：引用了 `nova/user/user.pb.h`（protobuf 生成的请求/响应消息类型）
-- **Phase 2 扩展**：届时将切换为 protoc-gen-brpc 自动生成的文件，客户端 Stub 类将用于 TypeScript 网关层发起 bRPC 调用
+- **当前状态**：user-service 继续使用手写 stubs（`user.brpc.h/cc`），message-service 使用 proto-gen.sh 生成的 stubs（`message.brpc.h/cc`）。两种方式均与 bRPC 框架兼容

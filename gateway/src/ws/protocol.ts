@@ -15,12 +15,14 @@
 // =============================================================================
 
 export type ClientMessage =
-  | ClientAuthMessage    // 认证 (login token)
-  | ClientSendMessage    // 发送消息
-  | ClientPingMessage    // 心跳
-  | ClientTypingMessage  // 输入中指示
-  | ClientReadReceiptMessage // 已读回执
-  | ClientRpcMessage;    // 通用 RPC 代理 (网关转发到 C++ 服务)
+  | ClientAuthMessage
+  | ClientSendMessage
+  | ClientPingMessage
+  | ClientTypingMessage
+  | ClientReadReceiptMessage
+  | ClientRpcMessage
+  | ClientCallSignal
+  | ClientRoomSignal;      // Phase 4.1: 多人语音房间
 
 /** 认证: 客户端发 token 登录 */
 export interface ClientAuthMessage {
@@ -75,6 +77,30 @@ export interface ClientReadReceiptMessage {
   };
 }
 
+/** Phase 4.1: 多人语音房间信令 */
+export interface ClientRoomSignal {
+  type: "room_signal";
+  seq: number;
+  payload: {
+    action: "create" | "invite" | "join" | "leave" | "webrtc";
+    room_id?: string;
+    invite_user_ids?: (string | number)[];
+    // webrtc 子类型
+    webrtc?: { signal_type: string; to_user_id: string | number; data?: Record<string, unknown> };
+  };
+}
+
+/** Phase 4: WebRTC 信令 (offer/answer/ICE candidate) */
+export interface ClientCallSignal {
+  type: "call_signal";
+  seq: number;
+  payload: {
+    signal_type: "offer" | "answer" | "ice_candidate" | "call_start" | "call_end";
+    to_user_id: number | string;
+    data?: Record<string, unknown>;  // sdp, candidate, etc.
+  };
+}
+
 /** 通用 RPC 代理: 客户端通过网关调用 C++ 服务的任意 RPC */
 export interface ClientRpcMessage {
   type: "rpc";
@@ -91,12 +117,14 @@ export interface ClientRpcMessage {
 // =============================================================================
 
 export type ServerMessage =
-  | ServerAuthOkMessage      // 认证成功
-  | ServerErrorMessage       // 错误
-  | ServerUpdateMessage      // 新消息/状态更新 (核心推送)
-  | ServerPongMessage        // 心跳响应
-  | ServerKickedMessage      // 被踢下线
-  | ServerRpcResultMessage;  // RPC 代理响应
+  | ServerAuthOkMessage
+  | ServerErrorMessage
+  | ServerUpdateMessage
+  | ServerPongMessage
+  | ServerKickedMessage
+  | ServerRpcResultMessage
+  | ServerCallSignal
+  | ServerRoomSignal;       // Phase 4.1: 多人语音房间
 
 export interface ServerAuthOkMessage {
   type: "auth_ok";
@@ -188,6 +216,41 @@ export function buildPong(seq: number): ServerPongMessage {
 
 export function buildKicked(reason: number, message: string): ServerKickedMessage {
   return { type: "kicked", payload: { reason, message } };
+}
+
+/** Phase 4: 网关转发给接收方的信令 */
+export interface ServerCallSignal {
+  type: "call_signal";
+  payload: {
+    signal_type: string;
+    from_user_id: number | string;
+    from_username: string;
+    data?: Record<string, unknown>;
+  };
+}
+
+/** Phase 4.1: 房间信令 (网关 → 客户端) */
+export interface ServerRoomSignal {
+  type: "room_signal";
+  payload: {
+    action: string;
+    room_id?: string;
+    from_user_id?: string | number;
+    from_username?: string;
+    participants?: { userId: string; username: string }[];
+    webrtc?: { signal_type: string; from_user_id: string | number; from_username: string; data?: Record<string, unknown> };
+  };
+}
+
+export function buildRoomSignal(payload: ServerRoomSignal["payload"]): ServerRoomSignal {
+  return { type: "room_signal", payload };
+}
+
+export function buildCallSignal(
+  signal_type: string, from_user_id: number | string,
+  from_username: string, data?: Record<string, unknown>
+): ServerCallSignal {
+  return { type: "call_signal", payload: { signal_type, from_user_id, from_username, data } };
 }
 
 export function buildRpcResult(

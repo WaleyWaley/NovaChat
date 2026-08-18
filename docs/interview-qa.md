@@ -20,7 +20,9 @@ Node.js 的事件驱动 + 异步非阻塞模型天然适合 I/O 密集型场景�
 
 ### Q3：多网关节点下，用户 A 发消息给用户 B 怎么知道 B 连在哪台网关上？
 
-B 上线时，网关把 B 的 userId 和当前网关地址写到 Redis（`SET user:online:<user_id> <gateway_addr> EX 30`，带 TTL 续期）。A 发消息给 B 时，message-service 查 Redis 拿到 B 所在的网关地址，通过 HTTP 调那台网关的 PushService 接口，网关再通过 WebSocket 推给 B。
+用户 B 上线时，网关把 B 的 userId 和当前网关地址写到 Redis（`SET user:online:<user_id> <gateway_addr> EX 30`，带 TTL 续期心跳）。当前简化设计中，message-service 的 PushDispatcher 不直接查 Redis——它直接把推送请求发给网关，网关 PushService 自己判断用户是否在线（先查本地 ConnectionManager，再查 Redis 跨节点查询）。这种设计将"在线判断"集中在网关层，减少 C++ 服务的外部依赖。
+
+消息可靠性保障：推送失败时消息已持久化在 message-service 中。用户 B 上线后通过 `GetMessages`（Timeline 分页）或 `GetSyncState`（增量同步）拉取遗漏消息，保证消息不丢。同时 `idempotency_key` 去重和 `push_id` 去重保证消息不重。
 
 ---
 

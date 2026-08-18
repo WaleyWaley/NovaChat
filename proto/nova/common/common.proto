@@ -9,6 +9,7 @@ package nova.common;
 
 // ============================= Error Codes ==================================
 // Telegram 风格: 每个错误场景都有精确的错误码, 客户端据此做精细化处理
+
 enum ErrorCode {
     OK = 0;
 

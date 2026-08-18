@@ -1,28 +1,43 @@
-# NovaChat 日志系统 (`logger.h` / `logger.cpp`)
+# NovaChat C++ 日志系统 (`logger.h` / `logger.cpp`)
 
 ## 技术职责
 
-`logger` 模块是 NovaChat 的日志封装层，Phase 1 直接代理到 **Google glog** 日志库，对外提供统一的日志宏接口。采用 inline 函数方式实现，头文件即实现，`.cpp` 文件为 Phase 3 的双缓冲异步日志预留占位。
+`logger.h` 是对 **glog**（Google Logging Library）的宏封装，为 NovaChat 的所有 C++ 微服务提供统一的日志输出接口。`logger.cpp` 为 Phase 3 双缓冲异步日志预留实现空间。
 
-核心内容包括：
+### 日志宏
 
-- **初始化/关闭**：`InitLogger(name, log_dir)` 调用 `google::InitGoogleLogging`，设置日志输出目录（默认 `./logs`），同时输出到文件和 stderr。`ShutdownLogger()` 用于进程退出前安全关闭日志系统。
-- **日志宏**：`NOVA_LOG_INFO` / `NOVA_LOG_WARN` / `NOVA_LOG_ERROR` / `NOVA_LOG_FATAL` 对应 glog 的不同级别；`NOVA_VLOG` / `NOVA_DLOG_INFO` / `NOVA_DVLOG` 提供条件日志和调试日志支持。
-- **Phase 3 扩展点**：`.cpp` 文件已被注释标记为 Phase 3 双缓冲异步日志的替换点。届时只需修改宏定义出的底层实现，所有调用方代码无需改动，体现接口与实现分离的设计。
+| 宏 | 级别 | 用途 |
+|------|------|------|
+| `NOVA_LOG_INFO` | INFO | 关键业务流程和状态变更 |
+| `NOVA_LOG_WARN` | WARNING | 可恢复的异常（Redis/MySQL 回退等） |
+| `NOVA_LOG_ERROR` | ERROR | 操作失败 |
+| `NOVA_LOG_FATAL` | FATAL | 无法恢复的错误（ClockRollback、端口绑定失败）、记录后终止进程 |
+| `NOVA_VLOG(n)` | VERBOSE | 详细调试日志（n 越大越详细，生产环境通常关闭） |
+| `NOVA_DLOG_INFO` | DEBUG | 仅在 DEBUG 编译模式下输出的日志 |
+| `NOVA_DVLOG(n)` | DEBUG VERBOSE | DEBUG 编译模式下的详细日志 |
+
+### 初始化
+
+`InitLogger(service_name)` 在服务 `main()` 中调用，功能包括：
+1. 设置 glog 相关信息（日志目录、最小级别）
+2. **启用 glog 内置异步缓冲**：`FLAGS_logbufsecs = 30`，日志在内存中缓冲 30 秒后批量刷盘，避免频繁 I/O 阻塞业务线程（Phase 3.3 优化）
+3. 记录服务名称用于日志前缀
+
+### Phase 3：双缓冲异步日志
+
+glog 已内置异步缓冲（`--logbufsecs=30`），性能满足 Phase 3 需求。当前 `InitLogger` 自动设置该参数。独立的手工双缓冲实现（Double-Buffering）留作可选优化——如需更细粒度的日志控制（如支持 Protobuf 结构化日志），可在 `logger.cpp` 中扩展。
 
 ## 业务角色
 
-在分布式 IM 系统中，日志是排查故障、监控系统运行的命脉。NovaChat 的日志宏被所有 C++ 微服务广泛使用，覆盖以下场景：
+在 NovaChat 分布式即时通讯系统中，日志模块是**运维可观测性的基础**：
 
-- **服务启动流程**：记录配置加载、数据库连接、监听端口等关键节点的状态。
-- **请求处理跟踪**：RPC 请求的接收与响应、用户登录/登出、消息收发等业务操作。
-- **异常与错误**：Redis/MySQL 连接失败、配置缺失、时钟回拨等非正常状态的报警。
-- **调试辅助**：`NOVA_VLOG` 提供分级调试输出，开发环境可开、生产环境可关。
-
-统一日志封装也意味着后续切换到自研高性能异步日志时，不需要修改业务代码的任何一行。
+- **问题排查**：所有服务使用统一的日志宏，日志自动带有服务名称前缀，便于在分布式环境中按服务过滤。
+- **性能保护**：`logbufsecs=30` 批量刷盘机制避免高并发下日志 I/O 成为瓶颈。
+- **致命错误保障**：`NOVA_LOG_FATAL` 在致命错误（如时钟严重回拨、Worker ID 配置错误）时记录日志并终止进程，防止系统在异常状态下运行。
 
 ## 系统连接
 
-- **被所有 C++ 模块引用**：`config.cpp` / `snowflake.cpp` / `mysql_pool.cpp` / `redis_client.cpp` 均使用 `NOVA_LOG_*` 宏记录日志。
-- **依赖 glog 库 (butil logging)**：butil 是 bRPC 框架的底层工具库，直接提供 glog 兼容接口。
-- **与 `Config` 配合**：服务的 `main()` 函数中通常先调用 `Config::Init()`，随后调用 `InitLogger()` 完成日志系统初始化。
+- 被所有 C++ 微服务的 `server.cc` 入口调用 `nova::InitLogger("service_name")` 和 `nova::ShutdownLogger()`。
+- 所有 NovaChat C++ 源码通过 `NOVA_LOG_*` 宏输出日志（而非直接调用 `LOG(INFO)`）。
+- `logger.cpp` 预留了 Phase 3+ 自定义双缓冲实现的空间，接口不变只需替换 `.cpp` 文件内容。
+- 与 bRPC 的 `glog` 依赖共用同一个日志基础设施，无需额外配置。

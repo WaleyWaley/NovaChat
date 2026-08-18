@@ -72,6 +72,7 @@ add_subdirectory(services/common)
 
 # 微服务
 add_subdirectory(services/user-service)
+add_subdirectory(services/message-service)
 
 # Phase 2: add_subdirectory(services/message-service)
 # Phase 4: add_subdirectory(services/media-service)

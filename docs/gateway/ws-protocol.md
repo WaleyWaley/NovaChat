@@ -13,8 +13,8 @@
 | `auth` | 携带 `access_token` 完成登录认证 |
 | `send_msg` | 发送聊天消息，指定对端类型/ID、消息内容 |
 | `ping` | 心跳保活 |
-| `typing` | 输入状态指示 |
-| `read` | 已读回执，携带 `max_read_msg_id` |
+| `typing` | 输入状态指示（Phase 4 实现转发） |
+| `read` | 已读回执，携带 `max_read_msg_id`（Phase 4 实现转发） |
 | `rpc` | 通用 RPC 代理，指定 `service` + `method` + `body`，由网关转发给 C++ 后端 |
 
 **网关到客户端 (ServerMessage)** — 共 6 种：
@@ -25,7 +25,7 @@
 | `error` | 操作失败的错误码和描述 |
 | `update` | 服务端主动推送（新消息、用户状态变更、输入指示等），**无 seq** |
 | `pong` | 心跳响应 |
-| `kicked` | 被踢下线通知 |
+| `kicked` | 被踢下线通知（含 `reason` 码和 `message`） |
 | `rpc_result` | RPC 代理调用结果 |
 
 ### 设计原则
@@ -33,22 +33,32 @@
 - **请求-响应匹配**：客户端生成的 `seq` 字段将请求与响应一一对应，支持并发请求
 - **透传设计**：网关不解析业务 payload，对 `send_msg`、`update` 等消息的业务字段仅做透传，保持与 C++ 后端的解耦
 - **统一推送通道**：参考 Telegram MTProto 的 Update 模型，所有服务端事件（新消息、状态更新、输入指示）通过同一个 `update` 消息下发，客户端根据 `update_type` 分发处理
+- **UpdateType 映射**：与 `proto/nova/common/common.proto` 中定义的 14 种 `UpdateType` 对应，包括 `UPDATE_NEW_MESSAGE`、`UPDATE_EDIT_MESSAGE`、`UPDATE_DELETE_MESSAGES`、`UPDATE_USER_STATUS`、`UPDATE_USER_TYPING` 等
 
 ### 辅助工具
 
-- `isClientMessage()` / `getMessageType()` — 运行时类型守卫，用于消息解析时的安全类型判断
-- `buildXxx()` 系列构造器 — 网关内部构造 ServerMessage 的便捷函数
+- `isClientMessage()` / `getMessageType()` — 运行时类型守卫，用于消息解析时的安全类型判断。`main.ts` 的 WebSocket `message` 处理器依赖这些函数做消息分发。
+- `buildXxx()` 系列构造器 — 网关内部构造 ServerMessage 的便捷函数：
+  - `buildAuthOk(seq, userId, username)` → auth_ok 消息
+  - `buildError(seq, errorCode, message)` → error 消息
+  - `buildUpdate(updateType, payload)` → update 消息（推送服务使用）
+  - `buildPong(seq)` → pong 心跳响应
+  - `buildKicked(reason, message)` → kicked 踢下线通知
+  - `buildRpcResult(seq, errorCode, errorMessage, data)` → RPC 代理结果
 
 ## 业务角色
 
 在 NovaChat 的 BFF (Backend For Frontend) 架构中，`protocol.ts` 是 **网关与客户端之间的通信契约**。它划定了网关的能力边界：
 
 - 网关不处理业务逻辑，只做**路由**（将 `rpc`、`send_msg` 等转发给 C++ 服务）和**推送**（将 C++ 下发的 `update` 事件广播给在线用户）
+- `send_msg` 处理器调用 `messageClient.sendMessage()` → C++ message-service 的实际业务链路
+- `rpc` 处理器通过 `proxyUserService()` 将请求路由到 C++ user-service 的具体方法
 - 该文件定义了客户端 SDK 与网关交互的全部 API 表面，是两端协同开发的基础
 
 ## 系统关联
 
 - 由 `connection.ts` 中的 `ConnectionManager` 在消息收发时引用这些类型
-- `auth` 消息会触发调用 `clients/user_client.ts` 中的登录/注册 RPC
-- `rpc` 消息通过 `BrpcClient` 转发到对应 C++ 微服务
-- 路由层 (`src/routes/`) 根据消息 `type` 分发到对应的处理函数
+- `auth` 消息会触发 `verifyAccessToken`（`auth/jwt.ts`）验证
+- `send_msg` 消息触发 `messageClient.sendMessage()`（`clients/message_client.ts`）
+- `rpc` 消息通过 `proxyUserService()` 转发到 `userClient`（`clients/user_client.ts`）
+- `push.ts` 中的 PushService 使用 `buildUpdate` / `buildKicked` 构造推送消息

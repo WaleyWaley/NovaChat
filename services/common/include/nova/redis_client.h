@@ -98,6 +98,7 @@ private:
     // 执行 Redis 命令 (底层: 通过 brpc::Channel 发送 RESP 协议)
     butil::Status SendCommand(const std::string& cmd, std::string* reply);
 
+    // 创建brpc::Channel 通信信道
     brpc::Channel channel_;
     bool ready_ = false;
 };

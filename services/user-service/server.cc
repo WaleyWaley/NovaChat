@@ -4,16 +4,25 @@
 // 启动流程:
 //   1. 解析命令行参数和配置文件
 //   2. 初始化日志系统和 Snowflake ID 生成器
-//   3. 创建 DAO 层和服务实现
-//   4. 添加服务到 bRPC Server 并启动
-//   5. RunUntilAskedToQuit() 等待信号
+//   3. (Phase 2) 初始化 MySQL 连接池和 Redis 客户端
+//   4. 创建 DAO 层和服务实现
+//   5. 添加服务到 bRPC Server 并启动
+//   6. RunUntilAskedToQuit() 等待信号
 //
 // 构建: 由 services/user-service/CMakeLists.txt 管理
-// 运行: ./nova_user_service --flagfile=conf/user_service.flags
+//
+// 开发模式 (无需外部依赖):
+//   ./nova_user_service --flagfile=conf/user_service.flags
+//
+// 完整模式 (MySQL + Redis):
+//   ./nova_user_service --flagfile=conf/user_service.flags \
+//       --enable_mysql --enable_redis
 // =============================================================================
 
 #include <brpc/server.h>
 #include <gflags/gflags.h>
+#include <thread>
+#include <chrono>
 
 #include "nova/common.h"
 #include "nova/config.h"
@@ -29,18 +38,20 @@ DEFINE_string(listen_addr, "0.0.0.0", "Listen address");
 DEFINE_int32(idle_timeout_sec, -1, "Idle connection timeout (-1 = no timeout)");
 DEFINE_int32(worker_id, 1, "Snowflake worker ID (0-1023, must be unique in cluster)");
 
-// MySQL 配置 (Phase 2 启用)
+// MySQL 配置
 DEFINE_string(mysql_addr, "127.0.0.1", "MySQL address");
 DEFINE_int32(mysql_port, 3306, "MySQL port");
 DEFINE_string(mysql_user, "root", "MySQL user");
 DEFINE_string(mysql_passwd, "", "MySQL password");
 DEFINE_string(mysql_db, "novachat", "MySQL database name");
 DEFINE_int32(mysql_pool_size, 8, "MySQL connection pool size");
+DEFINE_bool(enable_mysql, false, "Enable MySQL for persistent user storage");
 
-// Redis 配置 (Phase 2 启用)
+// Redis 配置
 DEFINE_string(redis_addr, "127.0.0.1", "Redis address");
 DEFINE_int32(redis_port, 6379, "Redis port");
 DEFINE_string(redis_passwd, "", "Redis password");
+DEFINE_bool(enable_redis, false, "Enable Redis for session caching");
 
 // ============================= main ===========================================
 
@@ -70,16 +81,52 @@ int main(int argc, char* argv[]) {
     NOVA_LOG_INFO << "Snowflake initialized (worker_id=" << FLAGS_worker_id
                   << ", epoch=" << nova::kSnowflakeEpoch << ")";
 
-    // --- 4. 创建 DAO 层 ---
-    // Phase 1: 使用内存模拟存储
-    // Phase 2: 改为 MySQL + Redis
+    // --- 4. 创建 DAO 层并初始化存储后端 ---
     nova::user::UserDao user_dao;
 
-    // Phase 2: 初始化 MySQL 连接池和 Redis 客户端
-    // if (!user_dao.InitMySql(...)) { ... }
-    // if (!user_dao.InitRedis(...)) { ... }
+    // MySQL: 持久化用户数据 (指数退避重试, 最多等 2 分钟)
+    if (FLAGS_enable_mysql) {
+        NOVA_LOG_INFO << "Initializing MySQL at " << FLAGS_mysql_addr
+                      << ":" << FLAGS_mysql_port << "/" << FLAGS_mysql_db;
+        bool mysql_ok = false;
+        int delay = 1;
+        for (int retry = 0; retry < 20; retry++) {
+            if (retry > 0) {
+                NOVA_LOG_INFO << "MySQL connection retry " << retry
+                              << "/20 (waiting " << delay << "s)...";
+                std::this_thread::sleep_for(std::chrono::seconds(delay));
+                if (delay < 30) delay *= 2;  // 指数退避: 1,2,4,8,16,30,30...
+            }
+            if (user_dao.InitMySql(FLAGS_mysql_addr, FLAGS_mysql_port,
+                                   FLAGS_mysql_user, FLAGS_mysql_passwd,
+                                   FLAGS_mysql_db, FLAGS_mysql_pool_size)) {
+                mysql_ok = true;
+                break;
+            }
+        }
+        if (!mysql_ok) {
+            NOVA_LOG_WARN << "MySQL initialization failed after 20 retries, "
+                          << "falling back to in-memory storage for users";
+        }
+    }
 
-    NOVA_LOG_INFO << "UserDao initialized (Phase 1: in-memory storage)";
+    // Redis: Session 缓存
+    if (FLAGS_enable_redis) {
+        NOVA_LOG_INFO << "Initializing Redis at " << FLAGS_redis_addr
+                      << ":" << FLAGS_redis_port;
+        if (!user_dao.InitRedis(FLAGS_redis_addr, FLAGS_redis_port,
+                                FLAGS_redis_passwd)) {
+            NOVA_LOG_WARN << "Redis initialization failed, "
+                          << "falling back to in-memory storage for sessions";
+        }
+    }
+
+    NOVA_LOG_INFO << "UserDao initialized (user storage: "
+                  << (FLAGS_enable_mysql && user_dao.IsStorageReady() ?
+                      "MySQL" : "in-memory")
+                  << ", session storage: "
+                  << (FLAGS_enable_redis ? "Redis" : "in-memory")
+                  << ", password: PBKDF2-SHA256)";
 
     // --- 5. 创建服务实现 ---
     nova::user::UserServiceImpl service_impl(&snowflake, &user_dao);
@@ -89,8 +136,6 @@ int main(int argc, char* argv[]) {
     brpc::ServerOptions options;
 
     options.idle_timeout_sec = FLAGS_idle_timeout_sec;
-    // 不设置 max_concurrency, 让 bthread 自动调度
-    // options.num_threads = 0;  // 0 = 使用 CPU 核心数
 
     // 添加 UserService
     if (server.AddService(&service_impl,
@@ -126,7 +171,10 @@ int main(int argc, char* argv[]) {
     // --- 8. 等待退出信号 ---
     server.RunUntilAskedToQuit();
 
-    // --- 9. 清理 ---
+    // --- 9. Phase 3.4: 优雅关闭 ---
+    NOVA_LOG_INFO << "User Service: draining connections...";
+    // bRPC 自动停止接受新连接, 等待现有请求完成 (最多 5 秒)
+    server.Stop(5000);
     NOVA_LOG_INFO << "User Service shutting down...";
     nova::ShutdownLogger();
     return 0;

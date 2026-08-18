@@ -51,6 +51,6 @@ const registry: Record<ServiceName, ServiceInfo> = {
 
 ## 系统关联
 
-- 被 `clients/user_client.ts` 和 `clients/message_client.ts` 等业务客户端引用，用于获取服务端点和 Protobuf 服务名
+- 被 `clients/user_client.ts` 和 `clients/message_client.ts` 等业务客户端引用，用于获取服务端点和 Protobuf 服务名。`message_client.ts` 当前直接使用 `config.MESSAGE_SERVICE_URL` 而非常用注册表查询
 - 服务 URL 值来自 `config/index.ts` 的配置系统，最终由环境变量驱动
 - `ServiceName` 联合类型（`"user-service" | "message-service" | "media-service"`）在 TypeScript 层面提供了编译期类型安全

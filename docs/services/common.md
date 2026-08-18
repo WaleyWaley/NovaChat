@@ -23,7 +23,9 @@
 
 ## 系统连接
 
-- **被所有 C++ 微服务引用**：`config` / `logger` / `snowflake` / `mysql_pool` / `redis_client` 等都间接或直接依赖于 `common.h`。
+- **被所有 C++ 微服务引用**：`config` / `logger` / `snowflake` / `mysql_pool` / `redis_client` / `password` 等都间接或直接依赖于 `common.h`。
 - **Snowflake ID 生成器**使用 `kSnowflakeEpoch` / `kWorkerIdBits` / `kSequenceBits` 等常量来构造 64 位唯一 ID。
 - **网关服务**使用 `kHeartbeatInterval` / `kSessionRouteTTL` 来管理长连接心跳和路由表刷新。
-- **用户服务 / 消息服务**使用 `kMaxUsernameLen` / `kMaxMessageLen` 等进行输入校验。该文件是整个服务端代码的编译依赖根节点。
+- **用户服务 / 消息服务**使用 `kMaxUsernameLen` / `kMaxMessageLen` 等进行输入校验。
+- **`password.h` / `password.cpp`**（Phase 2.2 新增）是 NovaChat 的密码哈希模块，位于 `services/common/` 共享库中，使用 PBKDF2-HMAC-SHA256 + OpenSSL EVP。所有 C++ 微服务均可通过 `#include "nova/password.h"` 使用统一的 `HashPassword` / `CheckPassword` 接口。
+- 该文件是整个服务端代码的编译依赖根节点。

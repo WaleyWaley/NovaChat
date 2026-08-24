@@ -47,6 +47,7 @@ const API = {
   },
 
   async getUserProfile(idOrName) {
+    // /^\d+$/是正则表达式，^表示开始，$表示结束，\d+表示一个或多个数字。这个正则表达式用于判断idOrName是否是纯数字的字符串。
     const body = /^\d+$/.test(String(idOrName))
       ? { user_id: Number(idOrName) }
       : { username: String(idOrName) };

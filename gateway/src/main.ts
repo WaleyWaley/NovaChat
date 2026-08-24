@@ -89,10 +89,10 @@ async function createApp() {
     "/ws",
     { websocket: true },
     (socket: WebSocket, req: FastifyRequest) => {
-      let authenticated = false;
-      let currentUserId: number | null = null;
-      let currentUsername = "";
-      let currentSessionId: string | null = null; // Phase 2.1
+      let authenticated = false;                    //身份认证
+      let currentUserId: number | null = null;      //当前用户ID
+      let currentUsername = "";                     //当前用户名
+      let currentSessionId: string | null = null;   //当前会话ID
 
       logger.info({ ip: req.ip }, "WebSocket connection established");
 

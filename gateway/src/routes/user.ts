@@ -54,7 +54,27 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         invite_hash: invite_hash ?? "",
       });
 
-      return reply.send(result);
+      if (result.error_code && result.error_code !== 0) {
+        return reply.send(result);
+      }
+
+      // 签发网关自己的 JWT (与 login 一致)。
+      // 之前直接透传 user-service 的 tok_ 不透明 token,
+      // 前端拿它做 WS auth 会被 verifyAccessToken 判为 "jwt malformed"。
+      const { signToken } = await import("../auth/jwt.js");
+      const user = result.user || { user_id: result.user_id, username };
+      const jwtResult = signToken({
+        user_id: user.user_id,
+        username: user.username || username,
+      });
+
+      return reply.send({
+        ...result,
+        access_token: jwtResult.access_token,
+        refresh_token: jwtResult.refresh_token,
+        expires_at: jwtResult.expires_at,
+        user,
+      });
     }
   );
 

@@ -37,8 +37,8 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      # 启动时自动建表
-      - ./scripts/docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # 启动时自动建表 (实际位置在 services/scripts/docker/, 旧路径 ./scripts/docker/ 是错的)
+      - ./services/scripts/docker/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       # 数据持久化
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -203,7 +203,9 @@ services:
     networks:
       - novachat-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      # 用 127.0.0.1 而非 localhost: busybox wget 会把 localhost 解析成 IPv6 ::1,
+      # 而网关只监听 IPv4, 导致健康检查永远 Connection refused
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
       interval: 15s
       timeout: 3s
       retries: 3
@@ -215,13 +217,13 @@ services:
   # Web Frontend (Nginx + Static)
   # ===========================================================================
   web:
-    image: nginx:alpine
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: novachat-web:latest
     container_name: novachat-web
     ports:
       - "80:80"
-    volumes:
-      - ./web:/usr/share/nginx/html:ro
-      - ./web/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - gateway
     restart: unless-stopped

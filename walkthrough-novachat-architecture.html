@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN" style="color-scheme: dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NovaChat 架构总览</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: { colors: {
+      wt: {
+        bg: '#000000', surface: '#0a0a0a', raised: '#141414',
+        border: '#2a2a2a', fg: '#ffffff', muted: '#a0a0a0',
+        accent: '#a855f7', file: '#c084fc', red: '#ef4444',
+      },
+      node: {
+        component: '#a855f7', composable: '#7c3aed', utility: '#6d28d9',
+        external: '#525252', event: '#d8b4fe', data: '#9333ea',
+      },
+    }}},
+  };
+</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  html, body { background: #000000; }
+  body { margin: 0; }
+  .mermaid-wrap svg { max-width: none !important; height: auto !important; }
+
+  /* Node hover (flowchart) */
+  .mermaid-wrap .node { cursor: pointer; }
+  .mermaid-wrap .node:hover rect,
+  .mermaid-wrap .node:hover polygon,
+  .mermaid-wrap .node:hover circle,
+  .mermaid-wrap .node:hover .label-container { filter: brightness(1.3); transition: filter .15s; }
+
+  /* Detail panel body */
+  .dt-body p { color:#a0a0a0; font-size:.88rem; line-height:1.65; margin-bottom:10px; }
+  .dt-body p code {
+    background:rgba(168,85,247,.12); padding:1px 6px; border-radius:4px;
+    font-family:'SF Mono','Fira Code',monospace; font-size:.82rem; color:#c084fc;
+  }
+
+  /* Shiki + fallback code blocks (shared base) */
+  .dt-body .shiki, .dt-body pre.code-fallback {
+    background: #000000; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 8px 0 14px;
+  }
+  .dt-body .shiki { background: #000000 !important; }
+  .dt-body .shiki code, .dt-body pre.code-fallback code {
+    font-family: 'SF Mono','Fira Code',monospace; font-size: .78rem; line-height: 1.55;
+    background: none; padding: 0; border-radius: 0;
+  }
+  .dt-body .shiki code { color: inherit; }
+  .dt-body pre.code-fallback code { color: #e0e0e0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import { createHighlighter } from 'https://cdn.jsdelivr.net/npm/shiki@3.22.0/+esm'
+const { useState, useEffect, useRef, useCallback } = React;
+
+const TITLE = "NovaChat 架构总览";
+const SUBTITLE = "原生 JS 前端 → nginx → Fastify 网关 (BFF) → C++ bRPC 微服务 → MySQL/Redis · 点击任意节点查看代码细节";
+
+const SUMMARY = "NovaChat 是一个 Telegram 风格的 IM 系统，采用 BFF 微服务架构：原生 JS 前端经 nginx 进入 TypeScript Fastify 网关（负责 JWT 鉴权和 WebSocket 长连接），网关通过 bRPC 的 http+pb JSON 协议把业务请求转发给两个 C++20 微服务（用户服务 :8001、消息服务 :8002）；消息落库后由 C++ 侧回调网关的 PushService，再经 WebSocket 实时推回客户端。MySQL 负责持久化（用户表 + 消息表），Redis 承载会话缓存与在线路由表，整套栈由 docker-compose 编排为 6 个容器。";
+
+const DIAGRAM = `graph LR
+    subgraph client_edge["前端与边缘"]
+        webFrontend["Chat Web App"]:::component
+        webApiClient["API / WebSocket Client"]:::composable
+        webNginx["Nginx Edge"]:::external
+    end
+    subgraph gateway_bff["网关 Gateway (BFF)"]
+        gatewayServer["Gateway Server (Fastify)"]:::component
+        jwtAuthMiddleware["JWT Auth Guard"]:::utility
+        brpcBackendClients["bRPC HTTP Clients"]:::composable
+        wsPushDelivery["Realtime Push Hub"]:::component
+    end
+    subgraph cpp_services["C++ 微服务"]
+        userService["User Service (bRPC :8001)"]:::component
+        userDao["User Data Layer"]:::data
+        messageService["Message Service (bRPC :8002)"]:::component
+        pushDispatcher["Push Dispatcher"]:::utility
+    end
+    subgraph deployment["部署编排"]
+        dockerCompose["Docker Compose Stack"]:::data
+    end
+
+    webFrontend -->|"调用"| webApiClient
+    webApiClient -->|"HTTP + WS 经"| webNginx
+    webNginx -->|"代理 /api /ws"| gatewayServer
+    webNginx -->|"/direct/user 直连"| userService
+    gatewayServer -->|"校验 JWT"| jwtAuthMiddleware
+    gatewayServer -->|"转发 RPC"| brpcBackendClients
+    brpcBackendClients -->|"http+pb JSON"| userService
+    brpcBackendClients -->|"http+pb JSON"| messageService
+    userService -->|"持久化"| userDao
+    messageService -->|"触发推送"| pushDispatcher
+    pushDispatcher -->|"POST PushUpdate"| wsPushDelivery
+    wsPushDelivery -->|"WS 推回"| webApiClient
+    dockerCompose -.->|"编排 6 容器"| gatewayServer
+    dockerCompose -.->|"编排 6 容器"| userService
+
+    classDef component fill:#a855f7,stroke:#c084fc,color:#fff
+    classDef composable fill:#7c3aed,stroke:#a78bfa,color:#fff
+    classDef utility fill:#6d28d9,stroke:#8b5cf6,color:#fff
+    classDef external fill:#525252,stroke:#737373,color:#fff
+    classDef event fill:#d8b4fe,stroke:#e9d5ff,color:#000
+    classDef data fill:#9333ea,stroke:#a855f7,color:#fff
+
+    click webFrontend nodeClickHandler "View details"
+    click webApiClient nodeClickHandler "View details"
+    click webNginx nodeClickHandler "View details"
+    click gatewayServer nodeClickHandler "View details"
+    click jwtAuthMiddleware nodeClickHandler "View details"
+    click brpcBackendClients nodeClickHandler "View details"
+    click wsPushDelivery nodeClickHandler "View details"
+    click userService nodeClickHandler "View details"
+    click userDao nodeClickHandler "View details"
+    click messageService nodeClickHandler "View details"
+    click pushDispatcher nodeClickHandler "View details"
+    click dockerCompose nodeClickHandler "View details"`;
+
+const NODES = {
+  webFrontend: {
+    title: "Chat Web App",
+    description: "纯原生 JavaScript 单页应用（无框架、无构建），渲染登录/注册页和 Telegram 风格聊天界面，并管理聊天状态、WebRTC 语音通话与自动重连。页面加载时从 localStorage 恢复 JWT 静默登录。",
+    files: ["web/js/app.js"],
+    code: `const result = await API.login(username, password);
+const accessToken = result.access_token;
+API._token = accessToken;
+localStorage.setItem('novachat_user', JSON.stringify(user));
+doConnect(accessToken, user);`,
+    lang: "javascript",
+  },
+  webApiClient: {
+    title: "API / WebSocket Client",
+    description: "前端唯一的后端通信层：把登录、用户资料等 REST 调用（带 Bearer token）和 WebSocket 长连接（auth 帧、带序号的 send_msg/call_signal 帧、30 秒心跳、断线自动重连）封装在一个对象里。",
+    files: ["web/js/api.js"],
+    code: `const ws = new WebSocket(this._wsUrl);
+ws.onopen = () => {
+  this._ws = ws;
+  this._send({ type: 'auth', seq: this._nextSeq(), payload: { access_token: accessToken } });
+};`,
+    lang: "javascript",
+  },
+  webNginx: {
+    title: "Nginx Edge",
+    description: "静态托管前端页面，并把 /api、/ws、/health 反向代理到 gateway:3000（/ws 带 Upgrade 头、1 天读超时）。还有两条特殊路由：/direct/user/ 绕过网关直连 C++ 用户服务，/nova.gateway.PushService/ 让 C++ 服务能回调网关推送。",
+    files: ["web/nginx/default.conf"],
+    code: `location /ws {
+    proxy_pass http://gateway:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}`,
+    lang: "nginx",
+  },
+  gatewayServer: {
+    title: "Gateway Server (Fastify BFF)",
+    description: "TypeScript Fastify 网关：注册 CORS、JWT/限流钩子和 health/push/user 三组路由插件，并托管唯一的 /ws 升级端点，解析 JSON 消息协议（auth、ping、send_msg、typing、read、call_signal、rpc），把业务 RPC 转发给 C++ 服务。",
+    files: ["gateway/src/main.ts", "gateway/src/config/index.ts"],
+    code: `app.get(
+  "/ws",
+  { websocket: true },
+  (socket: WebSocket, req: FastifyRequest) => {
+    let authenticated = false;                    //身份认证
+    let currentUserId: number | null = null;      //当前用户ID`,
+    lang: "typescript",
+  },
+  jwtAuthMiddleware: {
+    title: "JWT Auth Guard",
+    description: "Fastify preHandler 钩子，按四级白名单策略（NO_AUTH / REFRESH_TOKEN / PUBLIC / PROTECTED）校验 Bearer token：RS256 公钥 + kid 轮换（开发环境 HS256 兜底），并注入 request.userId / sessionId。生产环境的 token 由 C++ 用户服务签发，网关只负责验证。",
+    files: ["gateway/src/middleware/auth.ts", "gateway/src/auth/jwt.ts"],
+    code: `const token = authHeader.slice(7);
+const result = verifyAccessToken(token);
+if (!result.ok) {
+  return reply.status(401).send({ error_code: mapErrorToCode(result.error), error_message: result.message });
+}
+request.userId = result.payload.user_id;
+request.sessionId = result.payload.session_id;`,
+    lang: "typescript",
+  },
+  brpcBackendClients: {
+    title: "bRPC HTTP Clients",
+    description: "网关调用 C++ 服务的通道：按 bRPC 的 http+pb 约定把 JSON POST 到 {service}/{Method}，因此网关完全不需要 protobuf 库，只用手写 TS 类型对齐 proto。封装了 UserService 的 12 个 RPC 和 MessageService 的 2 个 RPC。",
+    files: ["gateway/src/clients/base.ts", "gateway/src/clients/user_client.ts", "gateway/src/clients/message_client.ts"],
+    code: `const url = \`\${this.baseUrl}/\${serviceName}/\${methodName}\`;
+const response = await fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", ...opts.headers },
+  body: JSON.stringify(body),
+  signal: controller.signal,
+});`,
+    lang: "typescript",
+  },
+  wsPushDelivery: {
+    title: "Realtime Push Hub",
+    description: "网关实现的 nova.gateway.PushService（push.proto）：以 HTTP 路由形式暴露 PushUpdate / PushToUsers / KickUser / IsUserOnline 等接口，供 C++ 服务把更新和踢人请求推给在线 WebSocket 连接。内存 ConnectionManager 维护 userId→WS 映射，同时把在线状态镜像到 Redis user:online:<id>，支持多网关节点互查。",
+    files: ["gateway/src/routes/push.ts", "gateway/src/ws/connection.ts", "gateway/src/ws/online_registry.ts"],
+    code: `const { type: _t, ...data } = update as Record<string, unknown>;
+const serverMsg = buildUpdate((update as any).type || 0, data);
+let delivered = connectionManager.sendToUser(String(target_user_id), serverMsg);`,
+    lang: "typescript",
+  },
+  userService: {
+    title: "User Service (bRPC :8001)",
+    description: "C++20 用户微服务：brpc::Server 监听 8001 端口，注册 12 个 UserService RPC（注册、登录、刷新 token、资料、改名、搜索、注销等）。启动时带重试地连接 MySQL（失败退化为内存模式）和 Redis（会话缓存），并用 Snowflake 生成用户 ID。",
+    files: ["services/user-service/server.cc", "services/user-service/user_service_impl.cc"],
+    code: `nova::user::UserServiceImpl service_impl(&snowflake, &user_dao);
+brpc::Server server;
+brpc::ServerOptions options;
+options.idle_timeout_sec = FLAGS_idle_timeout_sec;
+if (server.AddService(&service_impl,
+                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {`,
+    lang: "cpp",
+  },
+  userDao: {
+    title: "User Data Layer",
+    description: "用户服务的数据访问层：启用时把用户记录写入 MySQL users 表（字符串拼接 SQL，暂未用预编译），刷新会话存入 Redis（sess:<token> 字符串 + user_sess:<id> 集合）；未启用时静默退化为互斥锁保护的内存 map。",
+    files: ["services/user-service/user_dao.cc"],
+    code: `sql << "INSERT INTO users "
+    << "(user_id, username, password_hash, first_name, last_name, "
+    << "bio, avatar_photo_id, phone, is_deleted, "
+    << "created_at, updated_at, username_changed_at) VALUES ("
+    << user_id << ", " << "'" << Escape(username) << "', " ...
+// Redis session: key "sess:<refresh_token>" → "user_id|expires_at|device_type|device_name|created_at"
+redis_->Set(key, val, static_cast<int>(ttl));
+redis_->SAdd(UserSessKey(session.user_id), session.refresh_token);`,
+    lang: "cpp",
+  },
+  messageService: {
+    title: "Message Service (bRPC :8002)",
+    description: "C++20 消息微服务：实现 SendMessage / GetMessages / AckMessage / GetSyncState 四个 RPC——校验入参、Snowflake 分配消息 ID、按 idempotency_key 去重、写入 MessageDao（当前为内存实现，MySQL messages 表已建但未接入），然后通过 PushDispatcher 把 UPDATE_NEW_MESSAGE 推给接收方。",
+    files: ["services/message-service/server.cc", "services/message-service/message_service_impl.cc"],
+    code: `nova::message::MessageDao dao;
+nova::message::PushDispatcher push;
+push.Init("gateway:3000");
+nova::message::MessageServiceImpl service_impl(&snowflake, &dao, &push);
+brpc::Server server;
+if (server.AddService(&service_impl,
+                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {`,
+    lang: "cpp",
+  },
+  pushDispatcher: {
+    title: "Push Dispatcher",
+    description: "C++ 侧唯一的出站服务间通道：把 nova.gateway.PushUpdateReq 序列化成 JSON，通过 bRPC channel（PROTOCOL_HTTP 模式，3 秒超时）POST 到网关的 /nova.gateway.PushService/PushUpdate，由网关决定目标用户是否在线并走 WebSocket 下发。",
+    files: ["services/message-service/push_dispatcher.cc"],
+    code: `options.protocol = brpc::PROTOCOL_HTTP;
+options.timeout_ms = 3000;
+options.max_retry = 1;
+if (channel.Init(gateway_addr_.c_str(), &options) != 0) { ... }
+cntl.http_request().uri() = "/nova.gateway.PushService/PushUpdate";
+cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+channel.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);`,
+    lang: "cpp",
+  },
+  dockerCompose: {
+    title: "Docker Compose Stack",
+    description: "整个系统在 novachat-net 桥接网络上以 6 个容器运行：mysql:8.0（:3306，init.sql 自动建表）、redis:7（:6379，会话缓存 + 在线路由表）、C++ user-service（:8001）、C++ message-service（:8002）、TS 网关（:3000）和 web nginx（:80）。两个 C++ 服务都由根目录多阶段 Dockerfile（源码编译 bRPC 1.11.0）构建。",
+    files: ["docker-compose.yml", "Dockerfile"],
+    code: `web:
+  image: nginx:alpine
+  ports:
+    - "80:80"
+  depends_on:
+    - gateway`,
+    lang: "yaml",
+  },
+};
+
+const LEGEND = [
+  { label: '组件 / 服务', color: 'bg-node-component' },
+  { label: '连接层 / 客户端', color: 'bg-node-composable' },
+  { label: '工具 / 中间件', color: 'bg-node-utility' },
+  { label: '外部系统', color: 'bg-node-external' },
+  { label: '数据 / 配置', color: 'bg-node-data' },
+];
+
+// ---- Shiki pre-highlight ----
+const langs = [...new Set(Object.values(NODES).map(n => n.lang).filter(Boolean))];
+if (langs.length === 0) langs.push('typescript');
+let highlighter = null;
+try { highlighter = await createHighlighter({ themes: ['vitesse-dark'], langs }); }
+catch (e) { console.warn('Shiki failed:', e); }
+const HIGHLIGHTED = {};
+for (const [id, node] of Object.entries(NODES)) {
+  if (node.code && highlighter) {
+    try {
+      HIGHLIGHTED[id] = highlighter.codeToHtml(node.code, { lang: node.lang || 'typescript', theme: 'vitesse-dark' });
+    } catch (e) { console.warn(`Highlight failed for ${id}:`, e); }
+  }
+}
+
+// ---- Pan & zoom ----
+function usePanZoom() {
+  const viewportRef = useRef(null), canvasRef = useRef(null), zoomDisplayRef = useRef(null);
+  const st = useRef({ zoom: 1, panX: 0, panY: 0 });
+  const drag = useRef({ on: false, lx: 0, ly: 0 });
+
+  const apply = useCallback(() => {
+    const { zoom, panX, panY } = st.current;
+    if (canvasRef.current)
+      canvasRef.current.style.transform = `translate(${panX}px,${panY}px) scale(${zoom})`;
+    if (zoomDisplayRef.current)
+      zoomDisplayRef.current.textContent = Math.round(zoom * 100) + '%';
+  }, []);
+
+  const fitToScreen = useCallback(() => {
+    const svg = canvasRef.current && canvasRef.current.querySelector('svg');
+    const vp = viewportRef.current;
+    if (!svg || !vp) return;
+    const s = st.current;
+    const vw = vp.clientWidth, vh = vp.clientHeight;
+    const sw = svg.getBoundingClientRect().width / s.zoom;
+    const sh = svg.getBoundingClientRect().height / s.zoom;
+    const fit = Math.max(0.15, Math.min(2, Math.min((vw - 80) / sw, (vh - 80) / sh)));
+    s.zoom = fit; s.panX = (vw - sw * fit) / 2; s.panY = (vh - sh * fit) / 2;
+    apply();
+  }, [apply]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top, s = st.current;
+      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const nz = Math.min(4, Math.max(0.15, s.zoom * f)), sc = nz / s.zoom;
+      s.panX = mx - sc * (mx - s.panX); s.panY = my - sc * (my - s.panY); s.zoom = nz;
+      apply();
+    };
+    const onDown = (e) => {
+      if (e.target.closest('.node')) return;
+      drag.current = { on: true, lx: e.clientX, ly: e.clientY };
+      vp.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e) => {
+      const d = drag.current; if (!d.on) return;
+      st.current.panX += e.clientX - d.lx; st.current.panY += e.clientY - d.ly;
+      d.lx = e.clientX; d.ly = e.clientY; apply();
+    };
+    const onUp = () => { drag.current.on = false; };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    vp.addEventListener('pointerdown', onDown);
+    vp.addEventListener('pointermove', onMove);
+    vp.addEventListener('pointerup', onUp);
+    vp.addEventListener('pointercancel', onUp);
+    window.addEventListener('resize', fitToScreen);
+    return () => {
+      vp.removeEventListener('wheel', onWheel);
+      vp.removeEventListener('pointerdown', onDown);
+      vp.removeEventListener('pointermove', onMove);
+      vp.removeEventListener('pointerup', onUp);
+      vp.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('resize', fitToScreen);
+    };
+  }, [apply, fitToScreen]);
+
+  const zoomIn = useCallback(() => { st.current.zoom = Math.min(4, st.current.zoom * 1.25); apply(); }, [apply]);
+  const zoomOut = useCallback(() => { st.current.zoom = Math.max(0.15, st.current.zoom / 1.25); apply(); }, [apply]);
+  return { viewportRef, canvasRef, zoomDisplayRef, zoomIn, zoomOut, fitToScreen };
+}
+
+// ---- Mermaid render ----
+function MermaidDiagram({ onNodeClick }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    window.nodeClickHandler = onNodeClick;
+    mermaid.initialize({
+      startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+      themeVariables: {
+        primaryColor: '#0a0a0a', primaryTextColor: '#ffffff', primaryBorderColor: '#2a2a2a',
+        lineColor: '#a0a0a0', background: '#000000',
+        secondaryColor: '#000000', tertiaryColor: '#000000',
+        mainBkg: '#0a0a0a', nodeBorder: '#2a2a2a',
+        clusterBkg: 'rgba(10,10,10,0.8)', clusterBorder: '#7c3aed',
+        titleColor: '#ffffff', edgeLabelBackground: 'transparent',
+      },
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+    });
+    mermaid.render('walkthrough-diagram', DIAGRAM).then(({ svg, bindFunctions }) => {
+      if (ref.current) { ref.current.innerHTML = svg; bindFunctions && bindFunctions(ref.current); }
+    });
+    return () => { delete window.nodeClickHandler; };
+  }, [onNodeClick]);
+  return React.createElement('div', { ref: ref, className: 'mermaid-wrap' });
+}
+
+// ---- TL;DR summary (collapsed pill by default) ----
+function Summary({ collapsed, onToggle }) {
+  if (collapsed) {
+    return React.createElement('div', {
+      onClick: onToggle,
+      className: 'fixed top-16 left-6 z-10 px-3 py-1.5 bg-wt-surface/60 backdrop-blur border border-wt-border rounded-full shadow-lg cursor-pointer hover:bg-wt-surface/80 transition-all duration-300'
+    }, React.createElement('span', { className: 'text-xs text-wt-muted font-medium' }, 'ℹ︎ TL;DR'));
+  }
+  return React.createElement('div', {
+    onClick: onToggle,
+    className: 'fixed top-16 left-6 z-10 max-w-lg px-4 py-3 bg-wt-surface/80 backdrop-blur border border-wt-border rounded-lg shadow-lg cursor-pointer transition-all duration-300'
+  },
+    React.createElement('p', { className: 'text-sm text-wt-muted leading-relaxed' }, SUMMARY),
+    React.createElement('p', { className: 'text-[0.65rem] text-wt-muted/50 mt-1.5' }, '点击收起'));
+}
+
+// ---- Detail panel ----
+function DetailPanel({ nodeId, node, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const codeHtml = HIGHLIGHTED[nodeId];
+  return React.createElement('div', {
+    className: 'fixed top-4 right-4 bottom-4 w-[560px] z-30 bg-wt-surface border border-wt-border rounded-xl shadow-2xl flex flex-col overflow-hidden'
+  },
+    React.createElement('button', {
+      onClick: onClose,
+      className: 'absolute top-3 right-3 z-10 w-7 h-7 rounded-md border border-wt-border bg-wt-raised text-wt-muted flex items-center justify-center text-lg hover:bg-wt-red hover:border-wt-red hover:text-white transition-colors'
+    }, '×'),
+    React.createElement('div', { className: 'flex-1 overflow-y-auto p-5' },
+      React.createElement('h2', { className: 'text-lg font-bold text-wt-fg mb-3 pr-9' }, node.title),
+      React.createElement('div', { className: 'dt-body' }, React.createElement('p', null, node.description)),
+      node.code && React.createElement('div', { className: 'dt-body' },
+        codeHtml
+          ? React.createElement('div', { dangerouslySetInnerHTML: { __html: codeHtml } })
+          : React.createElement('pre', { className: 'code-fallback' }, React.createElement('code', null, node.code))
+      ),
+      node.files && node.files.length > 0 && React.createElement('div', { className: 'mt-4 pt-3 border-t border-wt-border' },
+        React.createElement('div', { className: 'text-[0.7rem] uppercase tracking-wider text-wt-muted font-semibold mb-1.5' }, 'Files'),
+        React.createElement('code', { className: 'text-sm text-wt-file font-mono leading-relaxed' },
+          node.files.map((f, i) => React.createElement('span', { key: i }, f, React.createElement('br')))
+        )
+      )
+    )
+  );
+}
+
+// ---- Zoom controls ----
+function ZoomControls({ zoomDisplayRef, onZoomIn, onZoomOut, onFit }) {
+  return React.createElement('div', {
+    className: 'fixed bottom-5 left-5 z-20 flex items-center gap-1 bg-wt-surface border border-wt-border rounded-lg shadow-xl px-2 py-1.5'
+  },
+    React.createElement('button', { onClick: onZoomOut, className: 'w-7 h-7 rounded-md text-wt-muted hover:bg-wt-raised hover:text-wt-fg transition-colors' }, '−'),
+    React.createElement('span', { ref: zoomDisplayRef, className: 'text-xs text-wt-muted w-12 text-center font-mono' }, '100%'),
+    React.createElement('button', { onClick: onZoomIn, className: 'w-7 h-7 rounded-md text-wt-muted hover:bg-wt-raised hover:text-wt-fg transition-colors' }, '+'),
+    React.createElement('button', { onClick: onFit, className: 'ml-1 px-2 h-7 rounded-md text-xs text-wt-muted hover:bg-wt-raised hover:text-wt-fg transition-colors' }, 'Fit')
+  );
+}
+
+// ---- App ----
+function App() {
+  const [activeId, _setActiveId] = useState(null);
+  const [summaryCollapsed, setSummaryCollapsed] = useState(true);
+  const pz = usePanZoom();
+
+  const setActiveNode = useCallback((nodeId) => {
+    _setActiveId(nodeId);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = nodeId ? '0.4' : '1'; });
+    if (nodeId) {
+      const el = document.querySelector(`.mermaid-wrap .node[id*="${nodeId}"]`);
+      if (el) el.style.opacity = '1';
+    }
+  }, []);
+  const closeDetail = useCallback(() => {
+    _setActiveId(null);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = '1'; });
+  }, []);
+  useEffect(() => { setTimeout(pz.fitToScreen, 600); }, [pz.fitToScreen]);
+
+  return React.createElement(React.Fragment, null,
+    React.createElement('header', {
+      className: 'fixed top-0 inset-x-0 z-10 px-6 py-3.5 bg-gradient-to-b from-wt-bg to-transparent pointer-events-none'
+    },
+      React.createElement('h1', { className: 'text-base font-semibold text-wt-fg' }, TITLE),
+      React.createElement('p', { className: 'text-sm text-wt-muted mt-0.5' }, SUBTITLE)
+    ),
+    React.createElement(Summary, { collapsed: summaryCollapsed, onToggle: () => setSummaryCollapsed(c => !c) }),
+    React.createElement('div', { ref: pz.viewportRef, className: 'w-full h-screen overflow-hidden cursor-grab active:cursor-grabbing' },
+      React.createElement('div', { ref: pz.canvasRef, className: 'origin-top-left will-change-transform inline-block p-[80px_60px_60px]' },
+        React.createElement(MermaidDiagram, { onNodeClick: setActiveNode })
+      )
+    ),
+    React.createElement(ZoomControls, {
+      zoomDisplayRef: pz.zoomDisplayRef, onZoomIn: pz.zoomIn, onZoomOut: pz.zoomOut, onFit: pz.fitToScreen
+    }),
+    React.createElement('div', {
+      className: 'fixed bottom-5 left-1/2 -translate-x-1/2 z-20 flex gap-4 px-4 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl'
+    },
+      LEGEND.map(l => React.createElement('span', { key: l.label, className: 'flex items-center gap-1.5 text-xs text-wt-muted' },
+        React.createElement('span', { className: `w-2 h-2 rounded-full ${l.color}` }), l.label))
+    ),
+    activeId && NODES[activeId] ? React.createElement(DetailPanel, { nodeId: activeId, node: NODES[activeId], onClose: closeDetail }) : null,
+    React.createElement('div', { className: 'fixed bottom-5 right-5 z-20 text-xs text-wt-muted opacity-50' },
+      React.createElement('kbd', null, 'Scroll'), ' 缩放 · ',
+      React.createElement('kbd', null, '拖拽'), ' 平移 · 点击节点看详情'
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>

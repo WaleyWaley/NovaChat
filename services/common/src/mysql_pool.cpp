@@ -66,6 +66,7 @@ bool MySqlPool::Init(const std::string& addr, int port,
         unsigned int timeout = 5;
         mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
         mysql_options(mysql, MYSQL_OPT_READ_TIMEOUT, &timeout);
+        
         // 自动重连
         bool reconnect = true;
         mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect);

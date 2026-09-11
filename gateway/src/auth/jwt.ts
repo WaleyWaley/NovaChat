@@ -17,7 +17,7 @@ import { logger } from "../utils/logger.js";
 // ---- 类型定义 ----
 
 export interface JwtPayload {
-  user_id: number;
+  user_id: string | number;   // int64: 经 base.ts 解析后为 string
   username: string;
   iat?: number;
   exp?: number;
@@ -277,7 +277,7 @@ export function signToken(payload: JwtPayload): TokenPair {
  */
 export function extractUserIdFromAuthHeader(
   authHeader: string | undefined
-): number | null {
+): string | number | null {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return null;
   }

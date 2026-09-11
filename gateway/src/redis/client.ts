@@ -103,7 +103,7 @@ class GatewayRedis {
   // ===== 在线路由表操作 =====
 
   /** 用户上线 — 写入 Redis 在线路由表 */
-  async setUserOnline(userId: number): Promise<boolean> {
+  async setUserOnline(userId: string | number): Promise<boolean> {
     if (!this.client || !this._connected) return false;
 
     const key = `user:online:${userId}`;
@@ -225,7 +225,7 @@ class GatewayRedis {
   }
 
   /** 用户下线 — 从 Redis 删除 */
-  async setUserOffline(userId: number): Promise<boolean> {
+  async setUserOffline(userId: string | number): Promise<boolean> {
     if (!this.client || !this._connected) return false;
 
     const key = `user:online:${userId}`;

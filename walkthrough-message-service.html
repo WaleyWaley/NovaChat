@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN" style="color-scheme: dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>message-service 消息中枢 · 一条消息的变形记</title>
+<script>
+  tailwind.config = {
+    theme: { extend: { colors: {
+      wt: {
+        bg: '#000000', surface: '#0a0a0a', raised: '#141414',
+        border: '#2a2a2a', fg: '#ffffff', muted: '#a0a0a0',
+        accent: '#a855f7', file: '#c084fc', red: '#ef4444',
+      },
+      node: {
+        component: '#a855f7', composable: '#7c3aed', utility: '#6d28d9',
+        external: '#525252', event: '#d8b4fe', data: '#9333ea',
+      },
+    }}},
+  };
+</script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  .mermaid-wrap svg { max-width: none !important; height: auto !important; }
+  .mermaid-wrap .node { cursor: pointer; }
+  .mermaid-wrap .node:hover rect,
+  .mermaid-wrap .node:hover polygon,
+  .mermaid-wrap .node:hover circle,
+  .mermaid-wrap .node:hover .label-container { filter: brightness(1.3); transition: filter .15s; }
+  .dt-body p { color:#a0a0a0; font-size:.88rem; line-height:1.65; margin-bottom:10px; }
+  .dt-body p code {
+    background:rgba(168,85,247,.12); padding:1px 6px; border-radius:4px;
+    font-family:'SF Mono','Fira Code',monospace; font-size:.82rem; color:#c084fc;
+  }
+  .dt-body .shiki, .dt-body pre.code-fallback {
+    background: #000000; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 8px 0 14px;
+  }
+  .dt-body .shiki { background: #000000 !important; }
+  .dt-body .shiki code, .dt-body pre.code-fallback code {
+    font-family: 'SF Mono','Fira Code',monospace; font-size: .78rem; line-height: 1.55;
+    background: none; padding: 0; border-radius: 0;
+  }
+  .dt-body .shiki code { color: inherit; }
+  .dt-body pre.code-fallback code { color: #e0e0e0; }
+</style>
+</head>
+<body class="bg-wt-bg">
+<div id="root"></div>
+<script type="module">
+import { createHighlighter } from 'https://cdn.jsdelivr.net/npm/shiki@3.22.0/+esm';
+const { useState, useEffect, useRef, useCallback } = React;
+
+const TITLE = 'message-service · 一条消息的变形记';
+const SUBTITLE = '用户 A 给用户 B 发一条 TEXT 消息，这一层对它做了什么、它变成了什么样子 —— 点击节点查看细节';
+
+const SUMMARY = "message-service 是 NovaChat 的消息中枢：接收网关转发的 SendMessage RPC，校验后用雪花算法补上全局唯一 message_id，经幂等键去重后落库（MySQL 就绪时写库、失败回退内存），再把 UPDATE_NEW_MESSAGE 事件经 HTTP 推回网关、由网关投递给接收者的 WebSocket。以「用户 A 给用户 B 发一条 TEXT 消息」为例：进站时它是 protobuf 的 SendMessageReq{from=A, to=B, type=TEXT, text=…}，在业务层变形为 MessageRecord（补上 message_id、created_at、status=SENT），出站时又变形为 common.Update 事件信封。整条链路共五种形态：WS JSON → HTTP JSON → protobuf → 内存 MessageRecord → HTTP JSON（推送）→ WS JSON。";
+
+const DIAGRAM = `flowchart TD
+    subgraph skeleton["服务骨架与契约"]
+        serverEntry["服务启动与装配"]
+        serviceProto["RPC 接口契约"]
+    end
+    subgraph inbound["请求处理"]
+        sendRequest["SendMessage 业务编排"]
+        snowflake["雪花 ID 生成"]
+        messageDao["存储与幂等去重"]
+    end
+    subgraph push["出站推送"]
+        pushDispatcher["推送分发器"]
+        gatewayPush["网关推送接收端"]
+    end
+
+    serviceProto -->|"按契约分派请求"| sendRequest
+    serverEntry -->|"装配依赖并注册"| sendRequest
+    sendRequest -->|"生成 message_id"| snowflake
+    sendRequest -->|"幂等去重后落库"| messageDao
+    sendRequest ==>|"落库成功后触发"| pushDispatcher
+    pushDispatcher -->|"HTTP JSON 推送"| gatewayPush
+
+    click serviceProto nodeClickHandler "查看详情"
+    click serverEntry nodeClickHandler "查看详情"
+    click sendRequest nodeClickHandler "查看详情"
+    click snowflake nodeClickHandler "查看详情"
+    click messageDao nodeClickHandler "查看详情"
+    click pushDispatcher nodeClickHandler "查看详情"
+    click gatewayPush nodeClickHandler "查看详情"
+
+    classDef component fill:#a855f7,stroke:#c084fc,color:#fff
+    classDef composable fill:#7c3aed,stroke:#a78bfa,color:#fff
+    classDef utility fill:#6d28d9,stroke:#8b5cf6,color:#fff
+    classDef external fill:#525252,stroke:#737373,color:#fff
+    classDef event fill:#d8b4fe,stroke:#e9d5ff,color:#000
+    classDef data fill:#9333ea,stroke:#a855f7,color:#fff
+
+    class serviceProto data
+    class serverEntry utility
+    class sendRequest component
+    class snowflake utility
+    class messageDao data
+    class pushDispatcher component
+    class gatewayPush external
+`;
+
+const NODES = {
+  serviceProto: {
+    title: 'RPC 接口契约',
+    description: '用 proto3 定义 MessageService 的四个 RPC（SendMessage / GetMessages / AckMessage / GetSyncState）。bRPC 按这份契约把网关发来的 HTTP JSON 自动转成强类型 protobuf，再分派到实现类。请求进站时的“样子”就是这里定义的 SendMessageReq：from_peer、to_peer、msg_type、text、idempotency_key。',
+    files: ['proto/nova/message/message.proto'],
+    code: `service MessageService {
+    rpc SendMessage  (SendMessageReq)  returns (SendMessageResp);
+    rpc GetMessages  (GetMessagesReq)  returns (GetMessagesResp);
+    rpc AckMessage   (AckMessageReq)   returns (AckMessageResp);
+    rpc GetSyncState (GetSyncStateReq) returns (GetSyncStateResp);
+}`,
+    lang: 'cpp',
+  },
+  serverEntry: {
+    title: '服务启动与装配',
+    description: 'server.cc 的 main 函数：读 gflags 配置（端口 8002、worker_id=2），创建 Snowflake、MessageDao、PushDispatcher 三个依赖，组装出 MessageServiceImpl 并注册进 brpc::Server。它是整个服务的“接线总装车间”。',
+    files: ['services/message-service/server.cc', 'services/message-service/conf/message_service.flags'],
+    code: `nova::message::MessageServiceImpl service_impl(&snowflake, &dao, &push);
+
+brpc::Server server;
+if (server.AddService(&service_impl, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {`,
+    lang: 'cpp',
+  },
+  sendRequest: {
+    title: 'SendMessage 业务编排',
+    description: '这一层的核心：校验参数 → 雪花 ID 组装 MessageRecord → 幂等落库 → 填响应 → 触发推送。A 发给 B 的 TEXT 消息在这里完成第一次变形：从 protobuf 请求变成补齐了 message_id / created_at / status 的 MessageRecord。',
+    files: ['services/message-service/message_service_impl.cc:64-92', 'services/message-service/message_service_impl.h'],
+    code: `MessageRecord record;
+record.message_id   = snowflake_->NextId();   // 服务端补上全局唯一 ID
+record.to_peer_type = request->to_peer().type();
+record.msg_type     = static_cast<int32_t>(request->msg_type());
+record.text         = request->text();
+
+auto stored = dao_->SaveMessage(record, idempotency_key);`,
+    lang: 'cpp',
+  },
+  snowflake: {
+    title: '雪花 ID 生成',
+    description: '为每条消息生成全局唯一、趋势递增的 64 位 ID（41 位毫秒时间戳 + 10 位 worker + 12 位序列号）。message-service 以 worker_id=2 运行；同一毫秒内序列号自增，时钟回拨 ≤5ms 时自旋等待。',
+    files: ['services/common/src/snowflake.cpp'],
+    code: `// 组装 64 位 ID：时间戳部分 | worker 部分 | 序列号
+int64_t timestamp_part = (ts - kSnowflakeEpoch) << kTimestampShift;
+return timestamp_part | worker_id_shift_ | seq;`,
+    lang: 'cpp',
+  },
+  messageDao: {
+    title: '存储与幂等去重',
+    description: 'Phase 4 双模存储：先补齐 created_at / status，MySQL 就绪时用 INSERT IGNORE + idempotency_key 唯一索引做数据库层原子去重（affected==0 即重复），写库失败或未启用时回退内存 vector + unordered_set。server.cc 里 InitMySql 失败会指数退避重试 20 次再降级内存。',
+    files: ['services/message-service/message_dao.cc:82-189', 'services/message-service/message_dao.h', 'services/message-service/server.cc:62-85'],
+    code: `if (has_key) {
+    // INSERT IGNORE + 唯一索引 = 原子去重; affected==0 ⇒ 重复
+    sql << "INSERT IGNORE INTO messages "
+        << "(message_id, from_peer_type, from_user_id, to_peer_type, "
+        << "to_peer_id, msg_type, text, reply_to_msg_id, flags, "
+        << "created_at, status, idempotency_key) VALUES ("
+}
+
+int64_t affected = 0;
+butil::Status st = mysql_->ExecuteAffected(sql.str(), &affected);
+if (affected == 0) return std::nullopt;  // 重复消息, 不存储`,
+    lang: 'cpp',
+  },
+  pushDispatcher: {
+    title: '推送分发器',
+    description: 'C++ 侧出站门面：把 Update 事件包装成 PushUpdateReq，用 bRPC HTTP Channel 序列化为 JSON，POST 到网关的 /nova.gateway.PushService/PushUpdate（3s 超时、重试 1 次）。不查在线表——谁在线由网关决定。',
+    files: ['services/message-service/push_dispatcher.cc', 'services/message-service/push_dispatcher.h'],
+    code: `::nova::gateway::PushUpdateReq req;
+req.set_target_user_id(user_id);
+req.mutable_update()->CopyFrom(update);
+bool ok = CallGatewayPush(req);   // HTTP POST 到 gateway:3000`,
+    lang: 'cpp',
+  },
+  gatewayPush: {
+    title: '网关推送接收端',
+    description: 'message-service 的出口边界（在网关侧）：Fastify 路由收到 HTTP JSON 推送后做 push_id 幂等去重，把 Update 转成 WS 协议帧，由 ConnectionManager 投递给 B 的在线连接。到这一步，消息完成了从 protobuf 到 WS JSON 的最后变形。',
+    files: ['gateway/src/routes/push.ts'],
+    code: `app.post<{ Body: PushUpdateReq }>(\`${SERVICE_PATH}/PushUpdate\`, async (request) => {
+  const { type: _t, ...data } = update;
+  const serverMsg = buildUpdate(update.type || 0, data);
+  let delivered = connectionManager.sendToUser(String(target_user_id), serverMsg);`,
+    lang: 'typescript',
+  },
+};
+
+const LEGEND = [
+  { label: '业务组件', color: 'bg-node-component' },
+  { label: '数据 / 契约', color: 'bg-node-data' },
+  { label: '基础设施', color: 'bg-node-utility' },
+  { label: '外部边界', color: 'bg-node-external' },
+];
+
+const langs = [...new Set(Object.values(NODES).map(n => n.lang).filter(Boolean))];
+if (langs.length === 0) langs.push('typescript');
+let highlighter = null;
+try { highlighter = await createHighlighter({ themes: ['vitesse-dark'], langs }); }
+catch (e) { console.warn('Shiki failed:', e); }
+const HIGHLIGHTED = {};
+for (const [id, node] of Object.entries(NODES)) {
+  if (node.code && highlighter) {
+    try {
+      HIGHLIGHTED[id] = highlighter.codeToHtml(node.code, { lang: node.lang || 'typescript', theme: 'vitesse-dark' });
+    } catch (e) { console.warn('Highlight failed for ' + id + ':', e); }
+  }
+}
+
+function usePanZoom() {
+  const viewportRef = useRef(null), canvasRef = useRef(null), zoomDisplayRef = useRef(null);
+  const st = useRef({ zoom: 1, panX: 0, panY: 0 });
+  const drag = useRef({ on: false, lx: 0, ly: 0 });
+
+  const apply = useCallback(() => {
+    const { zoom, panX, panY } = st.current;
+    if (canvasRef.current)
+      canvasRef.current.style.transform = 'translate(' + panX + 'px,' + panY + 'px) scale(' + zoom + ')';
+    if (zoomDisplayRef.current)
+      zoomDisplayRef.current.textContent = Math.round(zoom * 100) + '%';
+  }, []);
+
+  const fitToScreen = useCallback(() => {
+    const svg = canvasRef.current && canvasRef.current.querySelector('svg');
+    const vp = viewportRef.current;
+    if (!svg || !vp) return;
+    const s = st.current;
+    const vw = vp.clientWidth, vh = vp.clientHeight;
+    const sw = svg.getBoundingClientRect().width / s.zoom;
+    const sh = svg.getBoundingClientRect().height / s.zoom;
+    const fit = Math.max(0.15, Math.min(2, Math.min((vw - 80) / sw, (vh - 80) / sh)));
+    s.zoom = fit; s.panX = (vw - sw * fit) / 2; s.panY = (vh - sh * fit) / 2;
+    apply();
+  }, [apply]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top, s = st.current;
+      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const nz = Math.min(4, Math.max(0.15, s.zoom * f)), sc = nz / s.zoom;
+      s.panX = mx - sc * (mx - s.panX); s.panY = my - sc * (my - s.panY); s.zoom = nz;
+      apply();
+    };
+    const onDown = (e) => {
+      if (e.target.closest('.node')) return;
+      drag.current = { on: true, lx: e.clientX, ly: e.clientY };
+      vp.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e) => {
+      const d = drag.current; if (!d.on) return;
+      st.current.panX += e.clientX - d.lx; st.current.panY += e.clientY - d.ly;
+      d.lx = e.clientX; d.ly = e.clientY; apply();
+    };
+    const onUp = () => { drag.current.on = false; };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    vp.addEventListener('pointerdown', onDown);
+    vp.addEventListener('pointermove', onMove);
+    vp.addEventListener('pointerup', onUp);
+    vp.addEventListener('pointercancel', onUp);
+    window.addEventListener('resize', fitToScreen);
+    return () => {
+      vp.removeEventListener('wheel', onWheel);
+      vp.removeEventListener('pointerdown', onDown);
+      vp.removeEventListener('pointermove', onMove);
+      vp.removeEventListener('pointerup', onUp);
+      vp.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('resize', fitToScreen);
+    };
+  }, [apply, fitToScreen]);
+
+  const zoomIn = useCallback(() => { st.current.zoom = Math.min(4, st.current.zoom * 1.25); apply(); }, [apply]);
+  const zoomOut = useCallback(() => { st.current.zoom = Math.max(0.15, st.current.zoom / 1.25); apply(); }, [apply]);
+  return { viewportRef, canvasRef, zoomDisplayRef, zoomIn, zoomOut, fitToScreen };
+}
+
+function MermaidDiagram({ onNodeClick }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    let cancelled = false;
+    window.nodeClickHandler = onNodeClick;
+    mermaid.initialize({
+      startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+      themeVariables: {
+        primaryColor: '#0a0a0a', primaryTextColor: '#ffffff', primaryBorderColor: '#2a2a2a',
+        lineColor: '#a0a0a0', background: '#000000',
+        secondaryColor: '#000000', tertiaryColor: '#000000',
+        mainBkg: '#0a0a0a', nodeBorder: '#2a2a2a',
+        clusterBkg: 'rgba(10,10,10,0.8)', clusterBorder: '#7c3aed',
+        titleColor: '#ffffff', edgeLabelBackground: 'transparent',
+      },
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+    });
+    mermaid.render('walkthrough-diagram', DIAGRAM).then(({ svg, bindFunctions }) => {
+      if (!cancelled && ref.current) { ref.current.innerHTML = svg; bindFunctions?.(ref.current); }
+    });
+    return () => { cancelled = true; delete window.nodeClickHandler; };
+  }, [onNodeClick]);
+  return React.createElement('div', { ref, className: 'mermaid-wrap' });
+}
+
+function Summary({ collapsed, onToggle }) {
+  if (collapsed) {
+    return React.createElement('div',
+      { onClick: onToggle, className: 'fixed top-16 left-6 z-10 px-3 py-1.5 bg-wt-surface/60 backdrop-blur border border-wt-border rounded-full shadow-lg cursor-pointer hover:bg-wt-surface/80 transition-all duration-300' },
+      React.createElement('span', { className: 'text-xs text-wt-muted font-medium' }, 'ℹ︎ 摘要'));
+  }
+  return React.createElement('div',
+    { onClick: onToggle, className: 'fixed top-16 left-6 z-10 max-w-lg px-4 py-3 bg-wt-surface/80 backdrop-blur border border-wt-border rounded-lg shadow-lg cursor-pointer transition-all duration-300' },
+    React.createElement('p', { className: 'text-sm text-wt-muted leading-relaxed' }, SUMMARY),
+    React.createElement('p', { className: 'text-[0.65rem] text-wt-muted/50 mt-1.5' }, '点击收起'));
+}
+
+function DetailPanel({ nodeId, node, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const codeHtml = HIGHLIGHTED[nodeId];
+  return React.createElement('div',
+    { className: 'fixed top-4 right-4 bottom-4 w-[560px] z-30 bg-wt-surface border border-wt-border rounded-xl shadow-2xl flex flex-col overflow-hidden' },
+    React.createElement('button',
+      { onClick: onClose, className: 'absolute top-3 right-3 z-10 w-7 h-7 rounded-md border border-wt-border bg-wt-raised text-wt-muted flex items-center justify-center text-lg hover:bg-wt-red hover:border-wt-red hover:text-white transition-colors' },
+      '×'),
+    React.createElement('div', { className: 'flex-1 overflow-y-auto p-5' },
+      React.createElement('h2', { className: 'text-lg font-bold text-wt-fg mb-3 pr-9' }, node.title),
+      React.createElement('div', { className: 'dt-body' }, React.createElement('p', null, node.description)),
+      node.code ? React.createElement('div', { className: 'dt-body' },
+        codeHtml
+          ? React.createElement('div', { dangerouslySetInnerHTML: { __html: codeHtml } })
+          : React.createElement('pre', { className: 'code-fallback' }, React.createElement('code', null, node.code)))
+        : null,
+      node.files && node.files.length > 0 ? React.createElement('div', { className: 'mt-4 pt-3 border-t border-wt-border' },
+        React.createElement('div', { className: 'text-[0.7rem] uppercase tracking-wider text-wt-muted font-semibold mb-1.5' }, 'Files'),
+        React.createElement('code', { className: 'text-sm text-wt-file font-mono leading-relaxed' },
+          node.files.map((f, i) => React.createElement('span', { key: i }, f, React.createElement('br')))))
+        : null));
+}
+
+function ZoomControls({ zoomDisplayRef, onZoomIn, onZoomOut, onFit }) {
+  const btn = 'w-8 h-8 flex items-center justify-center rounded-md border border-wt-border bg-wt-surface text-wt-fg hover:bg-wt-raised transition-colors';
+  return React.createElement('div', { className: 'fixed bottom-5 left-5 z-20 flex items-center gap-2' },
+    React.createElement('button', { onClick: onZoomOut, className: btn, title: '缩小' }, '−'),
+    React.createElement('span', { ref: zoomDisplayRef, className: 'text-xs text-wt-muted w-11 text-center' }, '100%'),
+    React.createElement('button', { onClick: onZoomIn, className: btn, title: '放大' }, '+'),
+    React.createElement('button', { onClick: onFit, className: btn, title: '适应屏幕' }, '⤢'));
+}
+
+function App() {
+  const [activeId, _setActiveId] = useState(null);
+  const [summaryCollapsed, setSummaryCollapsed] = useState(true);
+  const pz = usePanZoom();
+
+  const setActiveNode = useCallback((nodeId) => {
+    _setActiveId(nodeId);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = nodeId ? '0.4' : '1'; });
+    if (nodeId) {
+      const el = document.querySelector('.mermaid-wrap .node[id*="' + nodeId + '"]');
+      if (el) el.style.opacity = '1';
+    }
+  }, []);
+  const closeDetail = useCallback(() => {
+    _setActiveId(null);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = '1'; });
+  }, []);
+  useEffect(() => { const t = setTimeout(pz.fitToScreen, 600); return () => clearTimeout(t); }, [pz.fitToScreen]);
+
+  return React.createElement(React.Fragment, null,
+    React.createElement('header', { className: 'fixed top-0 inset-x-0 z-10 px-6 py-3.5 bg-gradient-to-b from-wt-bg to-transparent pointer-events-none' },
+      React.createElement('h1', { className: 'text-base font-semibold text-wt-fg' }, TITLE),
+      React.createElement('p', { className: 'text-sm text-wt-muted mt-0.5' }, SUBTITLE)),
+    React.createElement(Summary, { collapsed: summaryCollapsed, onToggle: () => setSummaryCollapsed(c => !c) }),
+    React.createElement('div', { ref: pz.viewportRef, className: 'w-full h-screen overflow-hidden cursor-grab active:cursor-grabbing' },
+      React.createElement('div', { ref: pz.canvasRef, className: 'origin-top-left will-change-transform inline-block p-[80px_60px_60px]' },
+        React.createElement(MermaidDiagram, { onNodeClick: setActiveNode }))),
+    React.createElement(ZoomControls, { zoomDisplayRef: pz.zoomDisplayRef, onZoomIn: pz.zoomIn, onZoomOut: pz.zoomOut, onFit: pz.fitToScreen }),
+    React.createElement('div', { className: 'fixed bottom-5 left-1/2 -translate-x-1/2 z-20 flex gap-4 px-4 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl' },
+      LEGEND.map(l => React.createElement('span', { key: l.label, className: 'flex items-center gap-1.5 text-xs text-wt-muted' },
+        React.createElement('span', { className: 'w-2 h-2 rounded-full ' + l.color }), l.label))),
+    activeId && NODES[activeId] ? React.createElement(DetailPanel, { nodeId: activeId, node: NODES[activeId], onClose: closeDetail }) : null,
+    React.createElement('div', { className: 'fixed bottom-5 right-5 z-20 text-xs text-wt-muted opacity-50' },
+      React.createElement('kbd', null, '滚轮'), ' 缩放 · ',
+      React.createElement('kbd', null, '拖拽'), ' 平移 · 点击节点看细节'));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>

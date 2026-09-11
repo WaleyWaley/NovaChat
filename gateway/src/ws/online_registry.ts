@@ -30,7 +30,7 @@ export class OnlineRegistry {
    *
    * @returns 是否成功写入 Redis (不影响本地状态, 即使失败也返回 true)
    */
-  async onUserOnline(userId: number, username: string): Promise<void> {
+  async onUserOnline(userId: string | number, username: string): Promise<void> {
     logger.debug({ userId, username }, "Registering user online in Redis");
 
     if (!gatewayRedis.connected) {
@@ -52,7 +52,7 @@ export class OnlineRegistry {
   /**
    * 用户断开连接时调用 — 从 Redis 删除
    */
-  async onUserOffline(userId: number): Promise<void> {
+  async onUserOffline(userId: string | number): Promise<void> {
     logger.debug({ userId }, "Removing user from Redis online table");
 
     if (!gatewayRedis.connected) {

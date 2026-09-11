@@ -47,6 +47,7 @@ void MessageServiceImpl::SendMessage(
         ::nova::message::SendMessageResp* response,
         ::google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
+
     auto* cntl = static_cast<brpc::Controller*>(controller);
 
     NOVA_LOG_INFO << "SendMessage from=" << request->from_peer().id()
@@ -182,6 +183,88 @@ void MessageServiceImpl::GetMessages(
     NOVA_VLOG(1) << "GetMessages returned " << records.size() << " messages";
 }
 
+// ========================= GetDialogs (Phase 4.2) ============================
+
+void MessageServiceImpl::GetDialogs(
+        ::google::protobuf::RpcController* controller,
+        const ::nova::message::GetDialogsReq* request,
+        ::nova::message::GetDialogsResp* response,
+        ::google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+
+    NOVA_LOG_INFO << "GetDialogs user=" << request->user_id();
+
+    if (request->user_id() <= 0) {
+        response->set_error_code(::nova::common::PEER_NOT_FOUND);
+        response->set_error_message("Invalid user_id");
+        return;
+    }
+
+    int32_t limit = request->limit();
+    if (limit <= 0 || limit > 100) limit = 50;
+
+    auto dialogs = dao_->GetDialogs(request->user_id(), limit);
+
+    response->set_error_code(::nova::common::OK);
+    for (const auto& d : dialogs) {
+        auto* dp = response->add_dialogs();
+        dp->set_peer_type(d.peer_type);
+        dp->set_peer_id(d.peer_id);
+        dp->set_latest_msg_id(d.latest_msg_id);
+    }
+
+    NOVA_LOG_INFO << "GetDialogs returned " << dialogs.size() << " dialogs";
+}
+
+// ======================== GetConversation (Phase 4.2) ========================
+
+void MessageServiceImpl::GetConversation(
+        ::google::protobuf::RpcController* controller,
+        const ::nova::message::GetConversationReq* request,
+        ::nova::message::GetConversationResp* response,
+        ::google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+
+    NOVA_VLOG(1) << "GetConversation user=" << request->user_id()
+                 << " peer=(" << request->peer_type() << "," << request->peer_id() << ")"
+                 << " offset_id=" << request->offset_id();
+
+    if (request->user_id() <= 0 || request->peer_id() <= 0) {
+        response->set_error_code(::nova::common::PEER_NOT_FOUND);
+        response->set_error_message("Invalid user or peer");
+        return;
+    }
+
+    int32_t limit = request->limit();
+    if (limit <= 0 || limit > 100) limit = 50;
+
+    auto records = dao_->GetConversation(
+        request->user_id(),
+        static_cast<int32_t>(request->peer_type()),
+        request->peer_id(),
+        limit,
+        request->offset_id());
+
+    response->set_error_code(::nova::common::OK);
+    for (const auto& rec : records) {
+        auto* msg = response->add_messages();
+        msg->set_message_id(rec.message_id);
+        msg->mutable_from_peer()->set_type(
+            static_cast<::nova::common::PeerType>(rec.from_peer_type));
+        msg->mutable_from_peer()->set_id(rec.from_peer_id);
+        msg->mutable_to_peer()->set_type(
+            static_cast<::nova::common::PeerType>(rec.to_peer_type));
+        msg->mutable_to_peer()->set_id(rec.to_peer_id);
+        msg->set_type(static_cast<::nova::common::MessageType>(rec.msg_type));
+        msg->set_text(rec.text);
+        msg->set_status(static_cast<::nova::common::MessageStatus>(rec.status));
+        msg->set_created_at(rec.created_at);
+    }
+    response->set_has_more(static_cast<int32_t>(records.size()) >= limit);
+
+    NOVA_VLOG(1) << "GetConversation returned " << records.size() << " messages";
+}
+
 // ============================= AckMessage (Phase 3) ===========================
 
 void MessageServiceImpl::AckMessage(
@@ -211,6 +294,30 @@ void MessageServiceImpl::AckMessage(
 
     response->set_error_code(::nova::common::OK);
     NOVA_LOG_INFO << "AckMessage: " << updated << " messages acknowledged";
+
+    // --- Phase 4: 向发送方推送"已读"回执 (前端据此渲染双勾 ✓✓) ---
+    if (updated > 0 && request->status() == ::nova::common::MESSAGE_STATUS_READ) {
+        auto senders = dao_->GetAckedSenders(
+            static_cast<int32_t>(request->peer().type()),
+            request->peer().id(),
+            request->max_ack_msg_id());
+
+        for (int64_t sender_id : senders) {
+            if (sender_id == request->user_id()) continue;   // 不给自己推
+
+            ::nova::common::Update update;
+            update.set_type(::nova::common::UPDATE_MESSAGE_READ);
+            auto* rr = update.mutable_read_receipt();
+            rr->mutable_peer()->set_type(request->peer().type());
+            rr->mutable_peer()->set_id(request->peer().id());
+            rr->set_max_read_msg_id(request->max_ack_msg_id());
+            rr->set_read_at(nova::NowMs());
+
+            push_->PushToUser(sender_id, update);
+            NOVA_LOG_INFO << "AckMessage: pushed read receipt to sender " << sender_id
+                          << " up to msg_id=" << request->max_ack_msg_id();
+        }
+    }
 }
 
 // ============================= GetSyncState (Phase 3) ========================

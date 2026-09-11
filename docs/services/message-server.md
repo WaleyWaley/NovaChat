@@ -47,10 +47,10 @@
 ### PushDispatcher 初始化
 
 ```cpp
-push.Init("gateway:3000");
+push.Init("gateway:3000", &snowflake);
 ```
 
-硬编码网关地址为 Docker 网络中的服务名 `gateway:3000`。PushDispatcher 通过此地址向网关的 PushService 发起 HTTP POST 推送。
+硬编码网关地址为 Docker 网络中的服务名 `gateway:3000`。PushDispatcher 通过此地址向网关的 PushService 发起 HTTP POST 推送。第二个参数传入服务的 Snowflake，为每次推送生成唯一 `push_id`（网关据此幂等去重）。
 
 ### 优雅关闭（Phase 3.4）
 

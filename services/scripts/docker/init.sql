@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
     -- 会话路由
     from_user_id  BIGINT UNSIGNED  NOT NULL,
+    from_peer_type TINYINT         NOT NULL DEFAULT 1 COMMENT '1=user, 2=chat, 3=channel',
     to_peer_type  TINYINT          NOT NULL COMMENT '1=user, 2=chat, 3=channel',
     to_peer_id    BIGINT UNSIGNED  NOT NULL,
 
@@ -78,8 +79,13 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at    BIGINT UNSIGNED  NOT NULL,
     edited_at     BIGINT UNSIGNED  NOT NULL DEFAULT 0,
 
+    -- Phase 4: 消息状态 + 幂等去重
+    status        TINYINT          NOT NULL DEFAULT 1 COMMENT '1=SENT, 2=DELIVERED, 3=READ',
+    idempotency_key VARCHAR(128)   NULL DEFAULT NULL COMMENT '客户端幂等键 (空则不写)',
+
     -- 索引: 按时间线查询消息 (Timeline 模型)
     INDEX idx_peer_timeline (to_peer_type, to_peer_id, created_at DESC),
-    INDEX idx_from_user (from_user_id, created_at DESC)
+    INDEX idx_from_user (from_user_id, created_at DESC),
+    UNIQUE KEY uq_idempotency (idempotency_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='NovaChat 消息表';

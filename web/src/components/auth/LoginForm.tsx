@@ -33,6 +33,7 @@ export default function LoginForm() {
         username: username.trim(),
         first_name: result.user?.first_name || username.trim(),
         access_token: result.access_token || '',
+        refresh_token: result.refresh_token,
       };
       try {
         await loginFlow(user);

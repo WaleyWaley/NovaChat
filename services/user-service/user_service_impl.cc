@@ -2,7 +2,7 @@
 // NovaChat — UserServiceImpl 实现 (12 RPCs)
 //
 // Phase 1: 功能性桩实现, 使用内存存储
-// Phase 2: MySQL + Redis 持久化, bcrypt 密码哈希, JWT Token
+// Phase 2: MySQL + Redis 持久化, PBKDF2 密码哈希; Token 仍为简化格式 (JWT 待接入)
 // =============================================================================
 
 #include "user_service_impl.h"

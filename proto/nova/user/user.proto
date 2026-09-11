@@ -13,7 +13,7 @@ import "nova/common/common.proto";
 
 message RegisterReq {
     string username   = 1;   // @username, 全局唯一, 3-32 字符
-    string password   = 2;   // 明文密码 (网关侧已做 TLS 加密, 服务端 bcrypt 哈希后丢弃)
+    string password   = 2;   // 明文密码 (网关侧已做 TLS 加密, 服务端 PBKDF2-HMAC-SHA256 哈希后丢弃)
     string first_name = 3;   // 必填
     string last_name  = 4;   // 选填
     string phone      = 5;   // 选填, Phase 2 用于找回密码

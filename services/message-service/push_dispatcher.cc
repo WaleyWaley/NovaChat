@@ -13,9 +13,12 @@ namespace message {
 
 PushDispatcher::PushDispatcher() = default;
 
-bool PushDispatcher::Init(const std::string& gateway_addr) {
+bool PushDispatcher::Init(const std::string& gateway_addr,
+                          nova::Snowflake* snowflake) {
     gateway_addr_ = gateway_addr;
-    NOVA_LOG_INFO << "PushDispatcher: Gateway target = " << gateway_addr_;
+    snowflake_ = snowflake;
+    NOVA_LOG_INFO << "PushDispatcher: Gateway target = " << gateway_addr_
+                  << ", snowflake = " << (snowflake_ ? "set" : "none");
     return true;
 }
 
@@ -26,6 +29,10 @@ bool PushDispatcher::PushToUser(int64_t user_id,
     ::nova::gateway::PushUpdateReq req;
     req.set_target_user_id(user_id);
     req.mutable_update()->CopyFrom(update);
+    // 每次推送一个唯一 push_id (雪花), 网关据此幂等去重 — 防止 bRPC 重试导致重复推送
+    if (snowflake_) {
+        req.set_push_id(snowflake_->NextId());
+    }
 
     bool ok = CallGatewayPush(req);
     if (ok) {

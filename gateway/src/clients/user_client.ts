@@ -22,7 +22,7 @@ export interface RegisterReq {
 export interface RegisterResp {
   error_code: number;
   error_message: string;
-  user_id: number;
+  user_id: string | number;   // int64: base.ts 解析后为 string (精度安全)
   access_token: string;
   refresh_token: string;
   expires_at: number;
@@ -58,7 +58,7 @@ export interface RefreshTokenResp {
 }
 
 export interface LogoutReq {
-  user_id: number;
+  user_id: string | number;
 }
 
 export interface LogoutResp {
@@ -67,7 +67,7 @@ export interface LogoutResp {
 }
 
 export interface GetUserProfileReq {
-  user_id?: number;
+  user_id?: string | number;
   username?: string;
 }
 
@@ -88,7 +88,7 @@ export interface GetUsersResp {
 }
 
 export interface UpdateProfileReq {
-  user_id: number;
+  user_id: string | number;
   first_name?: string;
   last_name?: string;
   bio?: string;
@@ -102,7 +102,7 @@ export interface UpdateProfileResp {
 }
 
 export interface ChangeUsernameReq {
-  user_id: number;
+  user_id: string | number;
   new_username: string;
 }
 
@@ -136,7 +136,7 @@ export interface SearchUsersResp {
 }
 
 export interface ChangePasswordReq {
-  user_id: number;
+  user_id: string | number;
   old_password: string;
   new_password: string;
 }
@@ -147,7 +147,7 @@ export interface ChangePasswordResp {
 }
 
 export interface DeleteAccountReq {
-  user_id: number;
+  user_id: string | number;
   password: string;
   reason?: string;
 }
@@ -158,7 +158,7 @@ export interface DeleteAccountResp {
 }
 
 export interface UserProfile {
-  user_id: number;
+  user_id: string | number;   // int64: 经 base.ts 解析后为 string
   username: string;
   first_name: string;
   last_name: string;
@@ -206,7 +206,7 @@ export class UserClient {
     return this.call<RefreshTokenReq, RefreshTokenResp>("RefreshToken", req);
   }
 
-  async logout(userId: number): Promise<LogoutResp> {
+  async logout(userId: string | number): Promise<LogoutResp> {
     return this.call<LogoutReq, LogoutResp>("Logout", { user_id: userId });
   }
 
@@ -223,7 +223,7 @@ export class UserClient {
   // ===== 资料修改 =====
 
   async updateProfile(
-    userId: number,
+    userId: string | number,
     fields: Omit<UpdateProfileReq, "user_id">
   ): Promise<UpdateProfileResp> {
     return this.call<UpdateProfileReq, UpdateProfileResp>("UpdateProfile", {
@@ -232,7 +232,7 @@ export class UserClient {
     });
   }
 
-  async changeUsername(userId: number, newUsername: string): Promise<ChangeUsernameResp> {
+  async changeUsername(userId: string | number, newUsername: string): Promise<ChangeUsernameResp> {
     return this.call<ChangeUsernameReq, ChangeUsernameResp>("ChangeUsername", {
       user_id: userId,
       new_username: newUsername,
@@ -244,7 +244,7 @@ export class UserClient {
   }
 
   async changePassword(
-    userId: number,
+    userId: string | number,
     oldPassword: string,
     newPassword: string
   ): Promise<ChangePasswordResp> {
@@ -263,7 +263,7 @@ export class UserClient {
 
   // ===== 账户管理 =====
 
-  async deleteAccount(userId: number, password: string, reason?: string): Promise<DeleteAccountResp> {
+  async deleteAccount(userId: string | number, password: string, reason?: string): Promise<DeleteAccountResp> {
     return this.call<DeleteAccountReq, DeleteAccountResp>("DeleteAccount", {
       user_id: userId,
       password,

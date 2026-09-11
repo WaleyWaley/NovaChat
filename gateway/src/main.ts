@@ -20,8 +20,10 @@ import { logger } from "./utils/logger.js";
 import { registerAuthHook } from "./middleware/auth.js";
 import { registerRateLimitHook } from "./middleware/rate_limiter.js";
 import { healthRoutes } from "./routes/health.js";
+import { messageRoutes } from "./routes/message.js";
 import { pushRoutes } from "./routes/push.js";
 import { userRoutes } from "./routes/user.js";
+import { avatarRoutes } from "./routes/avatar.js";
 import { connectionManager } from "./ws/connection.js";
 import { onlineRegistry } from "./ws/online_registry.js";
 import { gatewayRedis } from "./redis/client.js";
@@ -81,8 +83,10 @@ async function createApp() {
 
   // ---- HTTP 路由 ----
   await app.register(healthRoutes);
+  await app.register(messageRoutes);
   await app.register(pushRoutes);
   await app.register(userRoutes);
+  await app.register(avatarRoutes);
 
   // ---- WebSocket 处理器 (客户端长连接入口) ----
   app.get(
@@ -90,7 +94,7 @@ async function createApp() {
     { websocket: true },
     (socket: WebSocket, req: FastifyRequest) => {
       let authenticated = false;                    //身份认证
-      let currentUserId: number | null = null;      //当前用户ID
+      let currentUserId: string | number | null = null;      //当前用户ID (int64 经 base.ts 解析后为 string)
       let currentUsername = "";                     //当前用户名
       let currentSessionId: string | null = null;   //当前会话ID
 
@@ -157,7 +161,9 @@ async function createApp() {
             handleTyping(clientMsg as ClientTypingMessage);
             break;
           case "read":
-            handleReadReceipt(clientMsg as ClientReadReceiptMessage);
+            handleReadReceipt(clientMsg as ClientReadReceiptMessage).catch((err) => {
+              logger.error({ err }, "read receipt handler error");
+            });
             break;
           case "call_signal":
             handleCallSignal(clientMsg as ClientCallSignal);
@@ -283,6 +289,22 @@ async function createApp() {
         currentUsername = payload.username;
         currentSessionId = payload.session_id ?? null;
 
+        // token 到期前主动断开 WS, 逼前端走"静默续期 → 重连"
+        // (前端 REST 层已实现 401 自动 refresh; 否则长连接会带着过期身份一直挂着)
+        if (payload.exp) {
+          const ttlMs = payload.exp * 1000 - Date.now();
+          if (ttlMs > 0) {
+            const expTimer = setTimeout(() => {
+              logger.info(
+                { userId: currentUserId },
+                "WS closing: access token expired, forcing refresh-reconnect"
+              );
+              ws.close(4003, "Token expired");
+            }, ttlMs);
+            ws.on("close", () => clearTimeout(expTimer));
+          }
+        }
+
         logger.info(
           {
             userId: currentUserId,
@@ -329,6 +351,7 @@ async function createApp() {
             msg_type: msg.payload.msg_type ?? 0,
             text: msg.payload.text,
             reply_to_msg_id: msg.payload.reply_to_msg_id,
+            idempotency_key: msg.payload.idempotency_key,
           });
 
           // proto3 omits error_code=0 from JSON, so it may be undefined
@@ -430,12 +453,53 @@ async function createApp() {
         );
       }
 
-      function handleReadReceipt(msg: ClientReadReceiptMessage): void {
-        // Phase 2: 转发已读回执到 message-service
+      async function handleReadReceipt(msg: ClientReadReceiptMessage): Promise<void> {
+        // Phase 4: 转发已读回执到 message-service 的 AckMessage RPC
+        if (!currentUserId) return;
+
+        const max_ack_msg_id = msg.payload.max_read_msg_id;
+        // 校验用数值转换, 但转发原值 (string 防雪花 ID 精度丢失)
+        if (!max_ack_msg_id || !Number.isFinite(Number(max_ack_msg_id)) ||
+            Number(max_ack_msg_id) <= 0) {
+          return;   // 无效回执, 静默丢弃
+        }
+
         logger.debug(
-          { from: currentUserId, to: msg.payload.peer_id },
-          "Read receipt (Phase 2)"
+          { user: currentUserId, max_read_msg_id: max_ack_msg_id },
+          "Forwarding read receipt to message-service"
         );
+
+        try {
+          // 服务端消息模型以"接收方自己"为对话键 (to_peer_id = 接收者用户 ID),
+          // 所以 peer.id 用鉴权注入的 currentUserId, 不信任客户端传的 peer_id
+          const result = await messageClient.ackMessage({
+            user_id: currentUserId,
+            peer: { type: msg.payload.peer_type || 1, id: currentUserId },
+            max_ack_msg_id: max_ack_msg_id,
+            status: 3,   // MESSAGE_STATUS_READ
+          });
+
+          // proto3 omits error_code=0 from JSON, so it may be undefined
+          if (result.error_code && result.error_code !== 0) {
+            socket.send(
+              JSON.stringify(
+                buildRpcResult(msg.seq, result.error_code, result.error_message || '', null)
+              )
+            );
+            return;
+          }
+
+          socket.send(
+            JSON.stringify(buildRpcResult(msg.seq, 0, "", { max_ack_msg_id }))
+          );
+        } catch (err) {
+          logger.error({ err }, "Failed to forward read receipt to message-service");
+          socket.send(
+            JSON.stringify(
+              buildRpcResult(msg.seq, 5001, "Failed to ack message", null)
+            )
+          );
+        }
       }
 
       async function handleRpc(
@@ -506,11 +570,22 @@ async function createApp() {
   });
 
   // ---- 全局错误处理 ----
+  // 注意: 必须透传错误自带的状态码 (如 multipart 超限的 413),
+  // 否则 RequestFileTooLargeError 会被吞成 500, 前端无法区分"文件太大"
   app.setErrorHandler((error, _request, reply) => {
-    logger.error({ err: error }, "Unhandled error");
-    reply.status(500).send({
-      error_code: 5001,
-      error_message: isDev ? error.message : "Internal server error",
+    const status =
+      typeof (error as { statusCode?: number }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 500;
+    logger.error({ err: error, status }, "Unhandled error");
+    reply.status(status).send({
+      error_code: status === 413 ? 1401 : 5001, // 1401 = FILE_TOO_LARGE (common.proto)
+      error_message:
+        status === 413
+          ? "File too large (max 2MB)"
+          : isDev
+            ? error.message
+            : "Internal server error",
     });
   });
 
@@ -527,7 +602,7 @@ async function createApp() {
 async function proxyUserService(
   method: string,
   body: Record<string, unknown>,
-  userId: number
+  userId: string | number
 ): Promise<unknown> {
   // 注入 user_id (网关已验证身份)
   const bodyWithUser = { ...body, user_id: userId };

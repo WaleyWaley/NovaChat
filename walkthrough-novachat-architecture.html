@@ -234,11 +234,11 @@ redis_->SAdd(UserSessKey(session.user_id), session.refresh_token);`,
   },
   messageService: {
     title: "Message Service (bRPC :8002)",
-    description: "C++20 消息微服务：实现 SendMessage / GetMessages / AckMessage / GetSyncState 四个 RPC——校验入参、Snowflake 分配消息 ID、按 idempotency_key 去重、写入 MessageDao（当前为内存实现，MySQL messages 表已建但未接入），然后通过 PushDispatcher 把 UPDATE_NEW_MESSAGE 推给接收方。",
+    description: "C++20 消息微服务：实现 SendMessage / GetMessages / AckMessage / GetSyncState / GetDialogs / GetConversation 六个 RPC——校验入参、Snowflake 分配消息 ID、按 idempotency_key 去重、写入 MessageDao（MySQL 就绪时落库、失败回退内存），然后通过 PushDispatcher 把 UPDATE_NEW_MESSAGE 推给接收方。",
     files: ["services/message-service/server.cc", "services/message-service/message_service_impl.cc"],
     code: `nova::message::MessageDao dao;
 nova::message::PushDispatcher push;
-push.Init("gateway:3000");
+push.Init("gateway:3000", &snowflake);
 nova::message::MessageServiceImpl service_impl(&snowflake, &dao, &push);
 brpc::Server server;
 if (server.AddService(&service_impl,

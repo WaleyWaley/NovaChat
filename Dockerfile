@@ -661,6 +661,15 @@ public:
                               const ::nova::message::GetSyncStateReq*,
                               ::nova::message::GetSyncStateResp*,
                               ::google::protobuf::Closure*) {}
+    // Phase 4.2
+    virtual void GetDialogs(::google::protobuf::RpcController*,
+                            const ::nova::message::GetDialogsReq*,
+                            ::nova::message::GetDialogsResp*,
+                            ::google::protobuf::Closure*) {}
+    virtual void GetConversation(::google::protobuf::RpcController*,
+                                 const ::nova::message::GetConversationReq*,
+                                 ::nova::message::GetConversationResp*,
+                                 ::google::protobuf::Closure*) {}
 
     static const ::google::protobuf::ServiceDescriptor* GetDescriptorStatic();
     const ::google::protobuf::ServiceDescriptor* GetDescriptor() override;
@@ -741,9 +750,24 @@ namespace {
         DescriptorProto* gs_resp = file_proto.add_message_type();
         gs_resp->set_name("GetSyncStateResp");
 
+        // GetDialogsReq + GetDialogsResp (Phase 4.2)
+        DescriptorProto* gd_req = file_proto.add_message_type();
+        gd_req->set_name("GetDialogsReq");
+        AddField(gd_req, "user_id", 1, FieldDescriptorProto::TYPE_INT64, FieldDescriptorProto::LABEL_OPTIONAL);
+        DescriptorProto* gd_resp = file_proto.add_message_type();
+        gd_resp->set_name("GetDialogsResp");
+
+        // GetConversationReq + GetConversationResp (Phase 4.2)
+        DescriptorProto* gc_req = file_proto.add_message_type();
+        gc_req->set_name("GetConversationReq");
+        AddField(gc_req, "user_id", 1, FieldDescriptorProto::TYPE_INT64, FieldDescriptorProto::LABEL_OPTIONAL);
+        DescriptorProto* gc_resp = file_proto.add_message_type();
+        gc_resp->set_name("GetConversationResp");
+
         ServiceDescriptorProto* svc = file_proto.add_service();
         svc->set_name("MessageService");
-        const char* methods[] = {"SendMessage", "GetMessages", "AckMessage", "GetSyncState"};
+        const char* methods[] = {"SendMessage", "GetMessages", "AckMessage", "GetSyncState",
+                                 "GetDialogs", "GetConversation"};
         for (const char* m : methods) {
             MethodDescriptorProto* method = svc->add_method();
             method->set_name(m);
@@ -784,6 +808,14 @@ void MessageServiceBase::CallMethod(
         GetSyncState(controller,
                      static_cast<const ::nova::message::GetSyncStateReq*>(request),
                      static_cast<::nova::message::GetSyncStateResp*>(response), done);
+    } else if (name == "GetDialogs") {
+        GetDialogs(controller,
+                   static_cast<const ::nova::message::GetDialogsReq*>(request),
+                   static_cast<::nova::message::GetDialogsResp*>(response), done);
+    } else if (name == "GetConversation") {
+        GetConversation(controller,
+                        static_cast<const ::nova::message::GetConversationReq*>(request),
+                        static_cast<::nova::message::GetConversationResp*>(response), done);
     }
 }
 const Message& MessageServiceBase::GetRequestPrototype(
@@ -792,7 +824,9 @@ const Message& MessageServiceBase::GetRequestPrototype(
     if (n == "SendMessage") return ::nova::message::SendMessageReq::default_instance();
     if (n == "GetMessages") return ::nova::message::GetMessagesReq::default_instance();
     if (n == "AckMessage") return ::nova::message::AckMessageReq::default_instance();
-    return ::nova::message::GetSyncStateReq::default_instance();
+    if (n == "GetSyncState") return ::nova::message::GetSyncStateReq::default_instance();
+    if (n == "GetDialogs") return ::nova::message::GetDialogsReq::default_instance();
+    return ::nova::message::GetConversationReq::default_instance();
 }
 const Message& MessageServiceBase::GetResponsePrototype(
     const MethodDescriptor* method) const {
@@ -800,7 +834,9 @@ const Message& MessageServiceBase::GetResponsePrototype(
     if (n == "SendMessage") return ::nova::message::SendMessageResp::default_instance();
     if (n == "GetMessages") return ::nova::message::GetMessagesResp::default_instance();
     if (n == "AckMessage") return ::nova::message::AckMessageResp::default_instance();
-    return ::nova::message::GetSyncStateResp::default_instance();
+    if (n == "GetSyncState") return ::nova::message::GetSyncStateResp::default_instance();
+    if (n == "GetDialogs") return ::nova::message::GetDialogsResp::default_instance();
+    return ::nova::message::GetConversationResp::default_instance();
 }
 
 }  // namespace message

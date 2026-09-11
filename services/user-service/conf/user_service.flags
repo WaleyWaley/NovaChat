@@ -16,8 +16,8 @@
 # --- 存储后端开关 (Phase 2) ---
 # 开发模式: 不开启, 使用内存存储
 # 生产模式: 去掉注释, 启用 MySQL + Redis
-# --enable_mysql
-# --enable_redis
+--enable_mysql
+--enable_redis
 
 # --- MySQL (enable_mysql=true 时有效) ---
 --mysql_addr=127.0.0.1

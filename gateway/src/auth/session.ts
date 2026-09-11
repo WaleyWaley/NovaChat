@@ -18,7 +18,7 @@ import { logger } from "../utils/logger.js";
 export interface Session {
   /** JWT payload 中的 session_id (由签发方生成) */
   sessionId: string;
-  userId: number;
+  userId: string | number;
   deviceName?: string;
   deviceType?: string;
   createdAt: number; // unix ms
@@ -38,13 +38,13 @@ export interface SessionStore {
   get(sessionId: string): Promise<Session | null>;
 
   /** 查找某用户的所有 session */
-  findByUserId(userId: number): Promise<Session[]>;
+  findByUserId(userId: string | number): Promise<Session[]>;
 
   /** 标记单个 session 为失效 (登出) */
   invalidate(sessionId: string): Promise<void>;
 
   /** 标记用户所有 session 为失效 (改密码、删号) */
-  invalidateAllForUser(userId: number): Promise<void>;
+  invalidateAllForUser(userId: string | number): Promise<void>;
 
   /** 更新 session 活跃时间 */
   updateActivity(sessionId: string): Promise<void>;
@@ -60,7 +60,7 @@ export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, Session>();
 
   /** userId → Set<sessionId> 反向索引 */
-  private readonly userIndex = new Map<number, Set<string>>();
+  private readonly userIndex = new Map<string | number, Set<string>>();
 
   /** 清理定时器 */
   private cleanupTimer: NodeJS.Timeout | null = null;
@@ -100,7 +100,7 @@ export class InMemorySessionStore implements SessionStore {
     return this.sessions.get(sessionId) ?? null;
   }
 
-  async findByUserId(userId: number): Promise<Session[]> {
+  async findByUserId(userId: string | number): Promise<Session[]> {
     const idSet = this.userIndex.get(userId);
     if (!idSet) return [];
 
@@ -120,7 +120,7 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
-  async invalidateAllForUser(userId: number): Promise<void> {
+  async invalidateAllForUser(userId: string | number): Promise<void> {
     const idSet = this.userIndex.get(userId);
     if (!idSet) return;
 

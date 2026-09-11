@@ -53,6 +53,9 @@ export interface GatewayConfig {
 
   // Phase 2.3: 在线状态心跳刷新间隔 (秒, 默认 15)
   ONLINE_HEARTBEAT_INTERVAL: number;
+
+  // Phase 4.3: 头像文件存储目录 (网关写入, nginx 从同一卷读取)
+  AVATAR_DIR: string;
 }
 
 function loadConfig(): GatewayConfig {
@@ -94,6 +97,8 @@ function loadConfig(): GatewayConfig {
     REDIS_PASSWORD: process.env.REDIS_PASSWORD || "",
     REDIS_ONLINE_TTL: parseInt(process.env.REDIS_ONLINE_TTL || "30", 10),
     ONLINE_HEARTBEAT_INTERVAL: parseInt(process.env.ONLINE_HEARTBEAT_INTERVAL || "15", 10),
+
+    AVATAR_DIR: process.env.AVATAR_DIR || "/app/data/avatars",
   };
 }
 

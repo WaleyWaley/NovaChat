@@ -15,6 +15,7 @@ const SearchBar = forwardRef<SearchBarHandle>(function SearchBar(_props, ref) {
   const [placeholder, setPlaceholder] = useState('Search users...');
   const setSearchResults = useAppStore((s) => s.setSearchResults);
   const upsertUserName = useAppStore((s) => s.upsertUserName);
+  const showToast = useAppStore((s) => s.showToast);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useImperativeHandle(ref, () => ({
@@ -37,6 +38,8 @@ const SearchBar = forwardRef<SearchBarHandle>(function SearchBar(_props, ref) {
       }
     } catch (err) {
       console.error('Search failed:', err);
+      // 让失败可见 (常见原因: token 过期被网关 401 拒绝)
+      showToast('搜索失败，请重新登录后重试', 'error');
     }
   };
 

@@ -39,6 +39,7 @@ MYSQL* conn = connections_[idx];
 |------|------|------|
 | `Init(addr, port, user, passwd, db, pool_size)` | 初始化连接池 | 创建 N 个 MYSQL 连接（UTF-8 字符集）+ 启动 N 个 pthread 工作线程 |
 | `Execute(sql)` | 执行写操作（INSERT/UPDATE/DELETE） | 返回 `butil::Status`（成功或携带错误信息） |
+| `ExecuteAffected(sql, affected)` | 执行写操作并返回受影响行数（Phase 4） | `mysql_affected_rows()` 默认语义 = 实际变更行数；`INSERT IGNORE` 撞唯一键时返回 0（MessageDao 判重用） |
 | `Query(sql, row_cb)` | 执行 SELECT 查询，每行回调 | `row_cb` 在 pthread 上下文中执行 |
 | `QueryAll(sql, rows)` | 便捷方法，一次性收集所有行 | `Row` = `map<string, string>`（列名 → 列值） |
 

@@ -41,10 +41,12 @@ export interface ClientSendMessage {
   seq: number;
   payload: {
     peer_type: number;  // PeerType: 1=user, 2=chat, 3=channel
-    peer_id: number;
+    peer_id: number;    // 对端的id
     msg_type: number;   // MessageType
     text?: string;
     reply_to_msg_id?: number;
+    // Phase 3: 幂等键 (客户端生成, 网关原样透传给 message-service 去重)
+    idempotency_key?: string;
     // Phase 3+: media, entities, etc.
   };
 }
@@ -73,7 +75,7 @@ export interface ClientReadReceiptMessage {
   payload: {
     peer_type: number;
     peer_id: number;
-    max_read_msg_id: number;
+    max_read_msg_id: string | number; // 前端传 string (雪花 ID 超出 JS Number 安全精度)
   };
 }
 
@@ -130,7 +132,7 @@ export interface ServerAuthOkMessage {
   type: "auth_ok";
   seq: number;  // 对应客户端的 auth 请求 seq
   payload: {
-    user_id: number;
+    user_id: string | number;  // int64 安全: 经 base.ts 解析后为 string
     username: string;
   };
 }
@@ -198,7 +200,7 @@ export function getMessageType(msg: unknown): string | null {
 // 消息构造器 (网关内部使用)
 // =============================================================================
 
-export function buildAuthOk(seq: number, user_id: number, username: string): ServerAuthOkMessage {
+export function buildAuthOk(seq: number, user_id: string | number, username: string): ServerAuthOkMessage {
   return { type: "auth_ok", seq, payload: { user_id, username } };
 }
 

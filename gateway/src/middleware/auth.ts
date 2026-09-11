@@ -18,8 +18,8 @@ import { logger } from "../utils/logger.js";
 
 declare module "fastify" {
   interface FastifyRequest {
-    /** 由 JWT 中间件注入的 user_id (未认证时为 undefined) */
-    userId?: number;
+    /** 由 JWT 中间件注入的 user_id (未认证时为 undefined; int64 为 string) */
+    userId?: string | number;
     /** Phase 2.1: session_id (来自 JWT payload) */
     sessionId?: string;
   }
@@ -135,7 +135,7 @@ export function registerAuthHook(app: FastifyInstance): void {
  * 尝试从 Authorization header 提取并验证 token
  * 返回 user_id 或 null (不会 reject 请求)
  */
-function tryInjectUser(request: FastifyRequest): number | null {
+function tryInjectUser(request: FastifyRequest): string | number | null {
   const authHeader = request.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return null;

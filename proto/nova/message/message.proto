@@ -77,6 +77,42 @@ message GetSyncStateResp {
     repeated nova.common.SyncState updated_states = 3;
 }
 
+// ==================== GetDialogs / GetConversation (Phase 4.2) ===============
+// 客户端登录后恢复会话列表与历史消息 (前端刷新后拉取)
+
+message DialogPeer {
+    int32 peer_type      = 1;
+    int64 peer_id        = 2;
+    int64 latest_msg_id  = 3;  // 该会话最新消息 ID (排序/游标用)
+}
+
+message GetDialogsReq {
+    int64 user_id = 1;
+    int32 limit   = 2;  // 默认 50, max 100
+}
+
+message GetDialogsResp {
+    nova.common.ErrorCode error_code    = 1;
+    string                error_message = 2;
+    repeated DialogPeer   dialogs       = 3;
+}
+
+message GetConversationReq {
+    int64 user_id   = 1;   // 当前用户 (网关鉴权注入)
+    int32 peer_type = 2;   // 对端类型
+    int64 peer_id   = 3;   // 对端 ID
+    int32 limit     = 4;   // 默认 50, max 100
+    int64 offset_id = 5;   // 游标: 0 = 最新
+}
+
+message GetConversationResp {
+    nova.common.ErrorCode error_code       = 1;
+    string                error_message    = 2;
+    repeated nova.common.Message messages  = 3;
+    bool                  has_more         = 4;
+    int64                 next_offset_id   = 5;
+}
+
 // ============================= Service =======================================
 
 service MessageService {
@@ -85,4 +121,7 @@ service MessageService {
     // Phase 3
     rpc AckMessage     (AckMessageReq)     returns (AckMessageResp);
     rpc GetSyncState   (GetSyncStateReq)   returns (GetSyncStateResp);
+    // Phase 4.2
+    rpc GetDialogs     (GetDialogsReq)     returns (GetDialogsResp);
+    rpc GetConversation (GetConversationReq) returns (GetConversationResp);
 }

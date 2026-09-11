@@ -54,6 +54,10 @@ public:
     // 执行写操作 (INSERT / UPDATE / DELETE)
     butil::Status Execute(const std::string& sql);
 
+    // 执行写操作并返回受影响行数 (Phase 4: INSERT IGNORE 去重检测 / ACK 计数)
+    // affected 可为 nullptr (等价于 Execute)
+    butil::Status ExecuteAffected(const std::string& sql, int64_t* affected);
+
     // 执行查询 (SELECT)
     // row_cb: 每行结果回调
     butil::Status Query(const std::string& sql,
@@ -71,11 +75,13 @@ private:
         std::string sql;
         bool is_query;
         butil::Status* result;
+        // bthread::CountdownEvent 用于挂起当前 bthread, 等待 Worker 完成
         bthread::CountdownEvent* done;
         // 查询结果
         std::vector<Row>* rows;           // QueryAll 用
         std::function<void(const Row&)>* row_cb;  // Query 回调
         std::mutex* cb_mutex;             // 回调线程安全锁
+        int64_t* affected;                // ExecuteAffected 用: 受影响行数
     };
 
     // 获取一个空闲连接 (阻塞直到有可用连接)
@@ -97,7 +103,9 @@ private:
     // 任务队列 + 线程池
     std::queue<Task> task_queue_;
     std::mutex queue_mu_;
+    // 通知 pthread 有新任务可执行
     std::condition_variable queue_cv_;
+    // 专用 pthread 线程池
     std::vector<std::thread> workers_;
     std::atomic<bool> running_{true};
 

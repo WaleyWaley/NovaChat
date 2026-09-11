@@ -133,6 +133,14 @@ services:
       - "--port=8002"
       - "--listen_addr=0.0.0.0"
       - "--worker_id=2"
+      # Phase 4: 启用 MySQL 持久化 (消息落库)
+      - "--enable_mysql"
+      - "--mysql_addr=mysql"
+      - "--mysql_port=3306"
+      - "--mysql_user=root"
+      - "--mysql_passwd=novachat_dev"
+      - "--mysql_db=novachat"
+      - "--mysql_pool_size=8"
       - "--enable_redis"
       - "--redis_addr=redis"
       - "--redis_port=6379"
@@ -194,6 +202,10 @@ services:
       # Session
       - SESSION_EXPIRES_IN=7d
       - SESSION_CLEANUP_INTERVAL=300000
+      # 头像文件存储目录 (Phase 4.3: 头像上传)
+      - AVATAR_DIR=/app/data/avatars
+    volumes:
+      - avatar-data:/app/data/avatars
     depends_on:
       user-service:
         condition: service_healthy
@@ -224,6 +236,9 @@ services:
     container_name: novachat-web
     ports:
       - "80:80"
+    volumes:
+      # 头像卷只读挂载: nginx 直接服务网关写入的头像文件
+      - avatar-data:/data/avatars:ro
     depends_on:
       - gateway
     restart: unless-stopped
@@ -240,4 +255,6 @@ volumes:
   mysql-data:
     driver: local
   redis-data:
+    driver: local
+  avatar-data:
     driver: local

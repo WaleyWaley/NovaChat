@@ -6,11 +6,12 @@
 // ===== 领域类型 =====
 
 export interface Me {
-  user_id: number;
+  user_id: string | number; // 网关 int64 安全解析后为 string
   username: string;
   first_name: string;
   access_token: string;
   refresh_token?: string;
+  avatar_photo_id?: string; // Phase 4.3: 头像文件名 (空串 = 无头像)
 }
 
 export type MessageStatus = 'sending' | 'sent' | 'received'; // 'received' 渲染为 ✓✓
@@ -32,7 +33,7 @@ export interface Chat {
 }
 
 export interface SearchUser {
-  user_id: number;
+  user_id: string | number;
   username: string;
   first_name?: string;
 }
@@ -55,6 +56,14 @@ export interface SendMsgPayload {
   peer_id: string | number;
   msg_type: 0; // TEXT
   text: string;
+  // 幂等键 (客户端生成, 每条消息一个 UUID): 服务端据此去重, 重试同一消息时复用同一 key
+  idempotency_key?: string;
+}
+
+export interface ReadReceiptPayload {
+  peer_type: 1; // USER
+  peer_id: string | number; // 网关忽略此值, 以鉴权用户为准
+  max_read_msg_id: string; // 64 位雪花 ID 用 string 传, 防 JS Number 精度丢失
 }
 
 export interface CallSignalPayload {

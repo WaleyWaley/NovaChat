@@ -16,6 +16,7 @@
 
 #include "nova/common/common.pb.h"
 #include "nova/gateway/push.pb.h"
+#include "nova/snowflake.h"
 
 namespace nova {
 namespace message {
@@ -24,8 +25,8 @@ class PushDispatcher {
 public:
     PushDispatcher();
 
-    // 初始化
-    bool Init(const std::string& gateway_addr);
+    // 初始化. snowflake 用于生成 push_id (网关据此去重, 防止 bRPC 重试导致重复推送)
+    bool Init(const std::string& gateway_addr, nova::Snowflake* snowflake);
 
     // 推送给单个用户
     bool PushToUser(int64_t user_id, const ::nova::common::Update& update);
@@ -39,7 +40,8 @@ private:
     // HTTP POST 到网关 PushService
     bool CallGatewayPush(const ::nova::gateway::PushUpdateReq& req);
 
-    std::string gateway_addr_;  // e.g. "gateway:3000"
+    std::string gateway_addr_;   // e.g. "gateway:3000"
+    nova::Snowflake* snowflake_ = nullptr;  // 非拥有, 与 message_id 共享同一生成器 (ID 空间不冲突)
 };
 
 }  // namespace message

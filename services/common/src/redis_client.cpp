@@ -165,16 +165,19 @@ butil::Status RedisClient::SendCommand(const std::string& cmd,
     }
 
     brpc::Controller cntl;
-    cntl.request_attachment().append(cmd);
+    cntl.request_attachment().append(cmd);  // 把命令全部塞进请求体
 
+    //普通 RPC 要传 method 名、request、response，但 Redis 协议里没有"方法"概念——命令本身已经写在 ① 的 attachment 里了。这是 brpc 对 Redis 协议的特殊用法：channel 认识 PROTOCOL_REDIS，你只管塞字符串，它负责发收
     channel_.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
 
     if (cntl.Failed()) {
         return butil::Status(-1, "Redis RPC failed: " + cntl.ErrorText());
     }
 
+    // brpc::Controller::response_attachment() 里就是 Redis 的 RESP 响应
     reply->assign(cntl.response_attachment().to_string());
 
+    // 检查 '-' 错误前缀: Redis 的"错误"在 RESP 层就是 - 开头的一段文本，所以 IsRespError 只看第一个字符
     if (IsRespError(*reply)) {
         // 去掉 \r\n
         std::string err = *reply;
@@ -183,19 +186,19 @@ butil::Status RedisClient::SendCommand(const std::string& cmd,
         return butil::Status(-1, "Redis error: " + err);
     }
 
-    return butil::Status::OK();
+
 }
 
 // ============================= Key/Value 操作 ================================
 
-butil::Status RedisClient::Set(const std::string& key, const std::string& value,
-                               int ttl_sec) {
+butil::Status RedisClient::Set(const std::string& key, const std::string& value, int ttl_sec) {
     std::vector<std::string> parts = {"SET", key, value};
     if (ttl_sec > 0) {
         parts.push_back("EX");
         parts.push_back(std::to_string(ttl_sec));
     }
     std::string reply;
+    // 发送 SET 命令, brpc::Channel 会把 parts 编码为 RESP, 发送给 Redis, 并把 RESP 响应放到 reply
     butil::Status st = SendCommand(RespCommand(parts), &reply);
     if (!st.ok()) return st;
 
@@ -234,6 +237,8 @@ butil::Status RedisClient::Del(const std::string& key) {
 butil::Status RedisClient::Exists(const std::string& key, bool* exists) {
     std::string reply;
     butil::Status st = SendCommand(RespCommand({"EXISTS", key}), &reply);
+
+    // 这不是 bug，是刻意的优雅降级：Session 查询时如果 Redis 挂了，与其让整个登录/验证流程报错，不如按"没查到"处理，让上层走内存回退路径。你的文档里写着这条架构原则："Redis 不可用 → Session 回退内存。网关永远可以启动。"
     if (!st.ok()) {
         // key 不存在是正常情况, 不是错误
         *exists = false;

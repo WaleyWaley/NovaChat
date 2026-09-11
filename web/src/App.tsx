@@ -11,6 +11,7 @@ import ToastHost from './components/ToastHost';
 import CallOverlay from './components/overlays/CallOverlay';
 import RoomPanel from './components/overlays/RoomPanel';
 import RoomInviteOverlay from './components/overlays/RoomInviteOverlay';
+import ProfilePanel from './components/overlays/ProfilePanel';
 
 export default function App() {
   const me = useAppStore((s) => s.me);
@@ -27,6 +28,7 @@ export default function App() {
       <CallOverlay />
       <RoomPanel />
       <RoomInviteOverlay />
+      <ProfilePanel />
     </>
   );
 }

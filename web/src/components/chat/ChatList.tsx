@@ -12,6 +12,7 @@ export default function ChatList() {
   const chatOrder = useAppStore((s) => s.chatOrder);
   const me = useAppStore((s) => s.me);
   const activePeerId = useAppStore((s) => s.activePeerId);
+  const userAvatars = useAppStore((s) => s.userAvatars);
 
   if (searchResults) {
     const results = searchResults.filter(
@@ -35,6 +36,7 @@ export default function ChatList() {
             name={u.first_name || u.username}
             username={u.username}
             active={false}
+            avatarId={userAvatars[String(u.user_id)] ?? null}
           />
         ))}
       </div>
@@ -54,6 +56,7 @@ export default function ChatList() {
             username={chat.peerName}
             unread={chat.unread}
             active={activePeerId === pid}
+            avatarId={userAvatars[pid] ?? null}
           />
         );
       })}

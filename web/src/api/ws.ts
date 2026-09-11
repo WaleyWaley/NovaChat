@@ -4,7 +4,8 @@
  *   connect/seq/自动重连/心跳/发送封装/事件发射器
  * StrictMode 防护: connect 缓存 in-flight promise, startPing 幂等。
  */
-import type { CallSignalPayload, OutboundMsg, RoomSignalPayload, SendMsgPayload, WsEvent } from '../types';
+import type { CallSignalPayload, OutboundMsg, ReadReceiptPayload, RoomSignalPayload, SendMsgPayload, WsEvent } from '../types';
+import { refreshAuthToken } from './rest';
 
 type WsHandler<T extends WsEvent['kind']> = (event: Extract<WsEvent, { kind: T }>) => void;
 
@@ -13,6 +14,7 @@ class WsManager {
   private seq = 0;
   private token: string | null = null;
   private authed = false;
+  private everAuthed = false; // 曾认证成功过 (用于区分"首次连接失败"与"重连时过期")
   private handlers = new Map<WsEvent['kind'], Set<(e: WsEvent) => void>>();
   private connectPromise: Promise<Record<string, unknown>> | null = null;
   private pendingAuth: {
@@ -60,6 +62,7 @@ class WsManager {
           const msg = JSON.parse(e.data) as { type: string; seq?: number; payload?: unknown };
           if (msg.type === 'auth_ok') {
             this.authed = true;
+            this.everAuthed = true;
             this._resolveAuth((msg.payload as Record<string, unknown>) ?? {});
           }
           this._handleMessage(msg);
@@ -78,6 +81,11 @@ class WsManager {
         if (this.ws === ws) this.ws = null;
         this.authed = false;
         this._rejectAuth(new Error(`Connection closed (${e.code})`));
+        // token 到期被网关主动断开 (4003): 静默续期后重连, 不打扰用户
+        if (e.code === 4003) {
+          void this._refreshAndReconnect();
+          return;
+        }
         // 自动重连 (对应 api.js:98-104)
         if (e.code !== 1000 && e.code !== 4001) {
           setTimeout(() => {
@@ -136,8 +144,32 @@ class WsManager {
       peer_id: peerId,
       msg_type: 0, // TEXT
       text,
+      idempotency_key: this._newIdempotencyKey(),
     };
     this._send({ type: 'send_msg', seq, payload });
+    return seq;
+  }
+
+  /** 幂等键: 每条消息生成一个 UUID, 服务端据此去重 (重试同一消息时由调用方复用同一 key) */
+  private _newIdempotencyKey(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `k-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  /**
+   * 已读回执: 告诉服务端"我看到了 up to 这条消息" (对应网关 ClientReadReceiptMessage)
+   * max_read_msg_id 传 string — 雪花 ID 59 位超出 JS Number 安全精度 (53 位)
+   */
+  sendReadReceipt(maxReadMsgId: string | number): number {
+    const seq = this._nextSeq();
+    const payload: ReadReceiptPayload = {
+      peer_type: 1, // USER
+      peer_id: 0,   // 网关以鉴权注入的 currentUserId 为准, 不信任此值
+      max_read_msg_id: String(maxReadMsgId),
+    };
+    this._send({ type: 'read', seq, payload });
     return seq;
   }
 
@@ -173,6 +205,21 @@ class WsManager {
     if (this.ws) {
       this.ws.close(1000, 'User logout');
       this.ws = null;
+    }
+  }
+
+  /** token 过期后: 静默续期 → 重连; 续期失败则登出回登录页 */
+  private async _refreshAndReconnect(): Promise<void> {
+    const renewed = await refreshAuthToken();
+    if (!renewed) {
+      const { useAppStore } = await import('../store/useAppStore');
+      useAppStore.getState().logout();
+      return;
+    }
+    try {
+      await this.connect(renewed);
+    } catch {
+      // 续期后的连接仍失败: 保持断线, 等待用户手动处理
     }
   }
 
@@ -212,6 +259,12 @@ class WsManager {
       }
       case 'error': {
         console.error('Server error:', msg.payload);
+        // 曾认证成功过 (重连场景) 且 token 过期/会话失效 → 静默续期重连
+        const code = (msg.payload as { error_code?: number } | undefined)?.error_code;
+        if (this.everAuthed && (code === 1002 || code === 1003)) {
+          void this._refreshAndReconnect();
+          break;
+        }
         // auth 被拒时网关回 error (code 1002/1003/1004), 让 connect() reject 而不是挂起
         const message = (msg.payload as { error_message?: string } | undefined)?.error_message;
         this._rejectAuth(new Error(message || 'Auth rejected'));

@@ -24,7 +24,7 @@ interface PushUpdateReq {
     payload?: Record<string, unknown>;
   };
   skip_offline?: boolean;
-  push_id?: number;
+  push_id?: string | number;  // 雪花 int64: proto3 JSON 映射按字符串传输
   ttl_seconds?: number;
 }
 
@@ -42,7 +42,7 @@ interface PushToUsersReq {
     payload?: Record<string, unknown>;
   };
   skip_offline?: boolean;
-  push_id?: number;
+  push_id?: string | number;  // 雪花 int64: proto3 JSON 映射按字符串传输
   ttl_seconds?: number;
 }
 

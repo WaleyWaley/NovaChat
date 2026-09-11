@@ -5,6 +5,9 @@
 #include <brpc/server.h>
 #include <gflags/gflags.h>
 
+#include <thread>
+#include <chrono>
+
 #include "nova/common.h"
 #include "nova/config.h"
 #include "nova/logger.h"
@@ -55,10 +58,37 @@ int main(int argc, char* argv[]) {
     nova::message::MessageDao dao;
     nova::message::PushDispatcher push;
 
-    // Phase 2.5: PushDispatcher 直连网关 (HTTP PushService)
-    push.Init("gateway:3000");
+    // Phase 4: MySQL 持久化 (指数退避重试, 失败回退内存存储 — 与 user-service 一致)
+    if (FLAGS_enable_mysql) {
+        NOVA_LOG_INFO << "Initializing MySQL at " << FLAGS_mysql_addr
+                      << ":" << FLAGS_mysql_port << "/" << FLAGS_mysql_db;
+        bool mysql_ok = false;
+        int delay = 1;
+        for (int retry = 0; retry < 20; retry++) {
+            if (retry > 0) {
+                NOVA_LOG_INFO << "MySQL connection retry " << retry
+                              << "/20 (waiting " << delay << "s)...";
+                std::this_thread::sleep_for(std::chrono::seconds(delay));
+                if (delay < 30) delay *= 2;   // 1,2,4,8,16,30,30...
+            }
+            if (dao.InitMySql(FLAGS_mysql_addr, FLAGS_mysql_port,
+                              FLAGS_mysql_user, FLAGS_mysql_passwd,
+                              FLAGS_mysql_db, FLAGS_mysql_pool_size)) {
+                mysql_ok = true;
+                break;
+            }
+        }
+        if (!mysql_ok) {
+            NOVA_LOG_WARN << "MySQL initialization failed after 20 retries, "
+                          << "falling back to in-memory message storage";
+        }
+    }
 
-    NOVA_LOG_INFO << "MessageDao + PushDispatcher initialized";
+    // Phase 2.5: PushDispatcher 直连网关 (HTTP PushService)
+    // 共享 snowflake 生成 push_id (与 message_id 同一 ID 空间, 互不冲突)
+    push.Init("gateway:3000", &snowflake);
+
+    NOVA_LOG_INFO << "MessageDao initialized (storage: " << dao.StorageMode() << ")";
 
     nova::message::MessageServiceImpl service_impl(&snowflake, &dao, &push);
 

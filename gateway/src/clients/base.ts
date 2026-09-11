@@ -25,7 +25,26 @@ export interface CallOptions {
   timeout?: number;      // 超时 ms (默认 5000)
   headers?: Record<string, string>;
   /** 注入到请求体的 user_id (网关鉴权后注入) */
-  injectUserId?: number;
+  injectUserId?: string | number;
+}
+
+/**
+ * int64 安全的 JSON 解析。
+ *
+ * 雪花 ID 是 59 位整数, 超出 JS Number 安全精度 (2^53 ≈ 9e15, 16 位)。
+ * JSON.parse 的 reviver 拿到的是已舍入的数字, 救不回来 —— 必须在解析前
+ * 把原始文本中 16 位以上的整数字面量加上引号, 让它们按 string 解析。
+ *
+ * 正则说明:
+ *   (?<=[:\[,]\s*) 前面必须是 JSON 结构符 (冒号/方括号/逗号),
+ *                  已带引号的字符串值 (如纯数字用户名 "1234567890123456")
+ *                  前面是引号, 不会被误伤
+ *   (\d{16,})      16 位以上整数 (时间戳只有 13 位, 不受影响)
+ *   (?=\s*[,\]\}]) 后面必须是 JSON 结构符
+ */
+export function parseBrpcJson(text: string): unknown {
+  const quoted = text.replace(/(?<=[:\[,]\s*)(\d{16,})(?=\s*[,\]\}])/g, '"$1"');
+  return JSON.parse(quoted);
 }
 
 // ---- BrpcClient ----
@@ -100,7 +119,7 @@ export class BrpcClient {
         );
       }
 
-      const data = (await response.json()) as TResp;
+      const data = parseBrpcJson(await response.text()) as TResp;
       logger.debug(
         { url, elapsed },
         "bRPC call ←"

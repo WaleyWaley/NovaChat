@@ -14,6 +14,7 @@ export default function Sidebar() {
   const me = useAppStore((s) => s.me);
   const logout = useAppStore((s) => s.logout);
   const setMenuOpen = useAppStore((s) => s.setMenuOpen);
+  const setProfileOpen = useAppStore((s) => s.setProfileOpen);
   const searchRef = useRef<{ focusAndReset: () => void } | null>(null);
 
   const onLogout = () => {
@@ -53,8 +54,13 @@ export default function Sidebar() {
       </div>
       <ChatList />
       <div className="sidebar-footer">
-        <div className="user-info">
-          <Avatar name={myName} size={36} className="user-avatar" />
+        <div
+          className="user-info"
+          title="Profile settings"
+          onClick={() => setProfileOpen(true)}
+          style={{ cursor: 'pointer' }}
+        >
+          <Avatar name={myName} size={36} avatarId={me?.avatar_photo_id ?? null} className="user-avatar" />
           <div className="user-detail">
             <span id="my-username">{myName}</span>
             <span className="user-status">online</span>

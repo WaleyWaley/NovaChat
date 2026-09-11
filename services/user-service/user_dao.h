@@ -28,7 +28,7 @@ namespace user {
 struct UserRecord {
     int64_t  user_id;
     std::string username;
-    std::string password_hash;   // bcrypt hash
+    std::string password_hash;   // 
     std::string first_name;
     std::string last_name;
     std::string bio;

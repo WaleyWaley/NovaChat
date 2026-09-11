@@ -12,9 +12,10 @@ interface Props {
   username: string;
   unread?: number;
   active?: boolean;
+  avatarId?: string | null;
 }
 
-export default function ChatItem({ peerId, name, username, unread = 0, active = false }: Props) {
+export default function ChatItem({ peerId, name, username, unread = 0, active = false, avatarId }: Props) {
   const openChat = useAppStore((s) => s.openChat);
   const roomId = useAppStore((s) => s.room.roomId);
   const showToast = useAppStore((s) => s.showToast);
@@ -31,7 +32,7 @@ export default function ChatItem({ peerId, name, username, unread = 0, active = 
 
   return (
     <div className={`chat-item${active ? ' active' : ''}`} onClick={onClick}>
-      <Avatar name={name} className="chat-item-avatar" />
+      <Avatar name={name} avatarId={avatarId} className="chat-item-avatar" />
       <div className="chat-item-content">
         <div className="chat-item-name">{name}</div>
         <div className="chat-item-preview">@{username || 'unknown'}</div>

@@ -128,6 +128,11 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /api/auth/refresh
    * 刷新 Token (Token 轮转)
+   *
+   * 说明: 登录/注册时签发的是网关自己的 JWT 对 (access + refresh),
+   * 因此刷新也由网关自己验证 (verifyRefreshToken) 并换发, 不再转发给
+   * user-service — C++ 侧只认识它自己签发的 rt_ 不透明 token, 透传会
+   * 因找不到 session 而失败, 且换回的 tok_ token 又会被本网关判为无效。
    */
   app.post<{ Body: { refresh_token: string } }>(
     "/api/auth/refresh",
@@ -141,8 +146,30 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const result = await userClient.refreshToken({ refresh_token });
-      return reply.send(result);
+      const { verifyRefreshToken, signToken } = await import("../auth/jwt.js");
+      const result = verifyRefreshToken(refresh_token);
+      if (!result.ok) {
+        const code = result.error === "EXPIRED" ? 1002 : 1004;
+        return reply.status(401).send({
+          error_code: code,
+          error_message: result.message,
+        });
+      }
+
+      // 沿用原 session_id 保证会话连续性; 换发新的 access + refresh (轮转)
+      const jwtResult = signToken({
+        user_id: result.payload.user_id,
+        username: result.payload.username,
+        session_id: result.payload.session_id,
+      });
+
+      return reply.send({
+        error_code: 0,
+        error_message: "",
+        access_token: jwtResult.access_token,
+        refresh_token: jwtResult.refresh_token,
+        expires_at: jwtResult.expires_at,
+      });
     }
   );
 
@@ -150,7 +177,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
    * POST /api/user/profile
    * 查用户资料 (需认证)
    */
-  app.post<{ Body: { user_id?: number; username?: string } }>(
+  app.post<{ Body: { user_id?: string | number; username?: string } }>(
     "/api/user/profile",
     async (request, reply) => {
       const { user_id, username } = request.body;
@@ -274,6 +301,14 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(401).send({
         error_code: 1004,
         error_message: "Authentication required",
+      });
+    }
+
+    // DAO 对空串静默忽略 (非空才更新), 显式拒绝避免"点了保存没反应"的困惑
+    if (request.body.first_name === "") {
+      return reply.status(400).send({
+        error_code: 1107, // FIRSTNAME_INVALID
+        error_message: "first_name cannot be empty",
       });
     }
 

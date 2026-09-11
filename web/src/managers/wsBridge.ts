@@ -43,6 +43,19 @@ export function initWsBridge(): void {
     if (!store.userNames[fromId]) void store.resolvePeerName(fromId);
   });
 
+  // UPDATE_MESSAGE_READ: 对方已读我的消息 → 双勾 ✓✓
+  wsManager.on('update', (e) => {
+    if (!(e.updateType === 3 || e.updateType === 'UPDATE_MESSAGE_READ' || e.updateType === '3')) return;
+    const data = e.data as Record<string, unknown> | undefined;
+    const rr = (data?.readReceipt ?? data?.read_receipt ?? data) as
+      | { maxReadMsgId?: string | number; max_read_msg_id?: string | number }
+      | undefined;
+    if (!rr) return;
+    const maxRead = String(rr.maxReadMsgId ?? rr.max_read_msg_id ?? '0');
+    if (maxRead === '0') return;
+    useAppStore.getState().markMessagesReceived(maxRead);
+  });
+
   // 信令转发给 WebRTC 管理器
   wsManager.on('call_signal', (e) => callManager.handleSignal(e.payload));
   wsManager.on('room_signal', (e) => roomManager.handleSignal(e.payload));

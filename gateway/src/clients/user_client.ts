@@ -23,9 +23,7 @@ export interface RegisterResp {
   error_code: number;
   error_message: string;
   user_id: string | number;   // int64: base.ts 解析后为 string (精度安全)
-  access_token: string;
-  refresh_token: string;
-  expires_at: number;
+  // 注: 无 token 字段 — user-service 不签发 token (BFF 模式), JWT 由网关统一签发
   user: UserProfile | null;
 }
 
@@ -39,31 +37,8 @@ export interface LoginReq {
 export interface LoginResp {
   error_code: number;
   error_message: string;
-  access_token: string;
-  refresh_token: string;
-  expires_at: number;
+  // 注: 无 token 字段 — JWT 由网关统一签发
   user: UserProfile | null;
-}
-
-export interface RefreshTokenReq {
-  refresh_token: string;
-}
-
-export interface RefreshTokenResp {
-  error_code: number;
-  error_message: string;
-  access_token: string;
-  refresh_token: string;
-  expires_at: number;
-}
-
-export interface LogoutReq {
-  user_id: string | number;
-}
-
-export interface LogoutResp {
-  error_code: number;
-  error_message: string;
 }
 
 export interface GetUserProfileReq {
@@ -200,14 +175,6 @@ export class UserClient {
 
   async login(req: LoginReq): Promise<LoginResp> {
     return this.call<LoginReq, LoginResp>("Login", req);
-  }
-
-  async refreshToken(req: RefreshTokenReq): Promise<RefreshTokenResp> {
-    return this.call<RefreshTokenReq, RefreshTokenResp>("RefreshToken", req);
-  }
-
-  async logout(userId: string | number): Promise<LogoutResp> {
-    return this.call<LogoutReq, LogoutResp>("Logout", { user_id: userId });
   }
 
   // ===== 资料查询 =====

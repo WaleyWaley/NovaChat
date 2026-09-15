@@ -47,12 +47,6 @@ DEFINE_string(mysql_db, "novachat", "MySQL database name");
 DEFINE_int32(mysql_pool_size, 8, "MySQL connection pool size");
 DEFINE_bool(enable_mysql, false, "Enable MySQL for persistent user storage");
 
-// Redis 配置
-DEFINE_string(redis_addr, "127.0.0.1", "Redis address");
-DEFINE_int32(redis_port, 6379, "Redis port");
-DEFINE_string(redis_passwd, "", "Redis password");
-DEFINE_bool(enable_redis, false, "Enable Redis for session caching");
-
 // ============================= main ===========================================
 
 int main(int argc, char* argv[]) {
@@ -110,22 +104,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Redis: Session 缓存
-    if (FLAGS_enable_redis) {
-        NOVA_LOG_INFO << "Initializing Redis at " << FLAGS_redis_addr
-                      << ":" << FLAGS_redis_port;
-        if (!user_dao.InitRedis(FLAGS_redis_addr, FLAGS_redis_port,
-                                FLAGS_redis_passwd)) {
-            NOVA_LOG_WARN << "Redis initialization failed, "
-                          << "falling back to in-memory storage for sessions";
-        }
-    }
+    // 注: 无 Session/Redis — 鉴权统一由网关负责 (BFF 模式), 本服务无状态
 
     NOVA_LOG_INFO << "UserDao initialized (user storage: "
                   << (FLAGS_enable_mysql && user_dao.IsStorageReady() ?
                       "MySQL" : "in-memory")
-                  << ", session storage: "
-                  << (FLAGS_enable_redis ? "Redis" : "in-memory")
                   << ", password: PBKDF2-SHA256)";
 
     // --- 5. 创建服务实现 ---
@@ -164,7 +147,7 @@ int main(int argc, char* argv[]) {
     NOVA_LOG_INFO << "  /nova.user.UserService/Register";
     NOVA_LOG_INFO << "  /nova.user.UserService/Login";
     NOVA_LOG_INFO << "  /nova.user.UserService/GetUserProfile";
-    NOVA_LOG_INFO << "  ... (12 RPCs total)";
+    NOVA_LOG_INFO << "  ... (10 RPCs total)";
     NOVA_LOG_INFO << "Health check: http://" << butil::endpoint2str(ep).c_str()
                   << "/status";
 

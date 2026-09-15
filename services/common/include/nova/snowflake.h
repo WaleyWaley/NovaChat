@@ -13,11 +13,11 @@
 // 寿命:  2^41 ms ≈ 69 年 (到 2093 年)
 // 吞吐:  4096 IDs/ms/worker ≈ 4M IDs/s (单机)
 //
-// 线程安全: sequence_ 用 atomic, last_timestamp_ 用 mutex 保护
-// 时钟回拨: ≤ 5ms spin 等待; > 5ms FATAL crash
+// 线程安全: NextId 全程持锁, sequence_ 与 last_timestamp_ 均为普通成员
+// 时钟回拨: last_timestamp_ 作为逻辑时钟只前进不后退 — 物理回拨时沿用
+//           逻辑时钟继续派号 (序列空间耗尽才等待物理时钟追上), 不杀进程
 // =============================================================================
 
-#include <atomic>
 #include <mutex>
 #include <cstdint>
 #include <string>
@@ -51,11 +51,11 @@ private:
     int64_t WaitNextMs(int64_t last);
 
     const int64_t worker_id_;
-    const int64_t worker_id_shift_;
+    int64_t worker_id_shift_;
 
-    std::atomic<int64_t> sequence_{0};
-    std::mutex            mu_;
-    int64_t               last_timestamp_{0};
+    int64_t     sequence_{0};       // 同一逻辑毫秒内的序列号 (mu_ 保护)
+    std::mutex  mu_;
+    int64_t     last_timestamp_{0}; // 逻辑时钟: 已派发的最后毫秒 (mu_ 保护)
 };
 
 }  // namespace nova

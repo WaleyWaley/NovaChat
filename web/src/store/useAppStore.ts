@@ -372,7 +372,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
             chats2[pid] = {
               peerId: pid,
               peerName: get().userNames[pid] ?? 'User ' + pid.slice(-6),
-              messages: historyMsgs,
+              messages: filtered,   // 必须用 filtered: 墓碑/水位线过滤后重建会话, 否则刷新后删除的消息复活
               unread: 0,   // 历史消息默认已读
             };
           }

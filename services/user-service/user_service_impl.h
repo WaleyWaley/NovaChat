@@ -44,16 +44,6 @@ public:
                ::nova::user::LoginResp* response,
                ::google::protobuf::Closure* done) override;
 
-    void RefreshToken(::google::protobuf::RpcController* controller,
-                      const ::nova::user::RefreshTokenReq* request,
-                      ::nova::user::RefreshTokenResp* response,
-                      ::google::protobuf::Closure* done) override;
-
-    void Logout(::google::protobuf::RpcController* controller,
-                const ::nova::user::LogoutReq* request,
-                ::nova::user::LogoutResp* response,
-                ::google::protobuf::Closure* done) override;
-
     // ==================== 资料查询 ====================
 
     void GetUserProfile(::google::protobuf::RpcController* controller,
@@ -103,10 +93,6 @@ public:
                        ::google::protobuf::Closure* done) override;
 
 private:
-    // 生成 JWT Token (Phase 1: 简化版; Phase 2: 完整 JWT)
-    std::string GenerateToken(int64_t user_id, const std::string& device_type);
-    std::string GenerateRefreshToken(int64_t user_id);
-
     // 校验参数合法性
     bool ValidateUsername(const std::string& username, std::string* error);
     bool ValidatePassword(const std::string& password, std::string* error);

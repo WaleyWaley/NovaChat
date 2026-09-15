@@ -32,18 +32,6 @@ bool MessageDao::InitMySql(const std::string& addr, int port,
 
 namespace {
 
-// SQL 字符串字面量转义 (与 UserDao 一致: 转义 ' 和 \)
-std::string EscapeSql(const std::string& s) {
-    std::string r;
-    r.reserve(s.size() + 2);
-    for (char c : s) {
-        if (c == '\'') r += "\\'";
-        else if (c == '\\') r += "\\\\";
-        else r += c;
-    }
-    return r;
-}
-
 // 从 Row 解析 int64; 缺失或空串 (SQL NULL 被 MySqlPool 转成 "") → 0
 int64_t ParseI64(const nova::Row& row, const std::string& key) {
     auto it = row.find(key);
@@ -88,60 +76,53 @@ std::optional<MessageRecord> MessageDao::SaveMessage(const MessageRecord& msg, c
         std::chrono::system_clock::now().time_since_epoch()).count();
     stored.status = 1;  // SENT
 
-    // --- MySQL 路径 (Phase 4) ---
+    // --- MySQL 路径 (Phase 4; 参数化查询, 数据与 SQL 结构分离) ---
     if (mysql_ && mysql_->IsReady() && stored.message_id != 0) {
         bool has_key = !idempotency_key.empty();
         int flags = stored.is_silent ? 2 : 0;   // bit1 = silent (schema 约定)
 
-        std::ostringstream sql;
+        // 普通 INSERT + 唯一索引: 重复由 -1062 精确判定 —
+        // 不再用 INSERT IGNORE (它会吞掉截断/无效值等非重复错误,
+        // 超长幂等键会被静默截断后误判为"重复"导致丢消息)
+        std::string sql;
+        std::vector<nova::SqlParam> params;
         if (has_key) {
-            // INSERT IGNORE + 唯一索引 = 原子去重; affected==0 ⇒ 重复
-            sql << "INSERT IGNORE INTO messages "
-                << "(message_id, from_peer_type, from_user_id, to_peer_type, "
-                << "to_peer_id, msg_type, text, reply_to_msg_id, flags, "
-                << "created_at, status, idempotency_key) VALUES ("
-                << stored.message_id << ", "
-                << stored.from_peer_type << ", "
-                << stored.from_peer_id << ", "
-                << stored.to_peer_type << ", "
-                << stored.to_peer_id << ", "
-                << stored.msg_type << ", "
-                << "'" << EscapeSql(stored.text) << "', "
-                << stored.reply_to_msg_id << ", "
-                << flags << ", "
-                << stored.created_at << ", "
-                << "1, "
-                << "'" << EscapeSql(idempotency_key) << "')";
+            sql = "INSERT INTO messages "
+                  "(message_id, from_peer_type, from_user_id, to_peer_type, "
+                  "to_peer_id, msg_type, text, reply_to_msg_id, flags, "
+                  "created_at, status, idempotency_key) VALUES "
+                  "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)";
+            params = {
+                stored.message_id, stored.from_peer_type, stored.from_peer_id,
+                stored.to_peer_type, stored.to_peer_id, stored.msg_type,
+                stored.text, stored.reply_to_msg_id, flags,
+                stored.created_at, idempotency_key,
+            };
         } else {
-            // 空 key → 普通 INSERT (不吞错误; NULL 幂等键永不冲突)
-            sql << "INSERT INTO messages "
-                << "(message_id, from_peer_type, from_user_id, to_peer_type, "
-                << "to_peer_id, msg_type, text, reply_to_msg_id, flags, "
-                << "created_at, status) VALUES ("
-                << stored.message_id << ", "
-                << stored.from_peer_type << ", "
-                << stored.from_peer_id << ", "
-                << stored.to_peer_type << ", "
-                << stored.to_peer_id << ", "
-                << stored.msg_type << ", "
-                << "'" << EscapeSql(stored.text) << "', "
-                << stored.reply_to_msg_id << ", "
-                << flags << ", "
-                << stored.created_at << ", "
-                << "1)";
+            // 空 key → 不带幂等键 (NULL 幂等键永不冲突)
+            sql = "INSERT INTO messages "
+                  "(message_id, from_peer_type, from_user_id, to_peer_type, "
+                  "to_peer_id, msg_type, text, reply_to_msg_id, flags, "
+                  "created_at, status) VALUES "
+                  "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)";
+            params = {
+                stored.message_id, stored.from_peer_type, stored.from_peer_id,
+                stored.to_peer_type, stored.to_peer_id, stored.msg_type,
+                stored.text, stored.reply_to_msg_id, flags,
+                stored.created_at,
+            };
         }
 
-        int64_t affected = 0;
-        butil::Status st = mysql_->ExecuteAffected(sql.str(), &affected);
+        butil::Status st = mysql_->ExecutePrepared(sql, params);
         if (!st.ok()) {
+            if (st.error_code() == -1062) {
+                // 幂等键唯一冲突 = 同一消息的重复提交
+                NOVA_LOG_INFO << "MessageDao: Duplicate message blocked (key="
+                              << idempotency_key << ")";
+                return std::nullopt;  // 重复消息, 不存储
+            }
             NOVA_LOG_ERROR << "MessageDao: MySQL INSERT failed: " << st.error_str();
             return std::nullopt;
-        }
-        if (affected == 0) {
-            // 只有 INSERT IGNORE + 唯一键冲突才会 0 行
-            NOVA_LOG_INFO << "MessageDao: Duplicate message blocked (key="
-                          << idempotency_key << ")";
-            return std::nullopt;  // 重复消息, 不存储
         }
 
         NOVA_VLOG(2) << "MessageDao: Saved msg_id=" << stored.message_id
@@ -205,19 +186,19 @@ std::vector<MessageRecord> MessageDao::GetMessages(
     // 限流保护 (两种模式共享)
     if (limit <= 0 || limit > 100) limit = 20;
 
-    // --- MySQL 路径 (Phase 4) ---
+    // --- MySQL 路径 (Phase 4; 参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "SELECT " << kSelectRowColumns << " FROM messages "
-            << "WHERE to_peer_type = " << to_peer_type
-            << " AND to_peer_id = " << to_peer_id;
+        std::string sql = std::string("SELECT ") + kSelectRowColumns + " FROM messages "
+            "WHERE to_peer_type = ? AND to_peer_id = ?";
+        std::vector<nova::SqlParam> params = {to_peer_type, to_peer_id};
         if (offset_id > 0) {
-            sql << " AND message_id < " << offset_id;  // 游标: 只取更旧的
+            sql += " AND message_id < ?";   // 游标: 只取更旧的
+            params.emplace_back(offset_id);
         }
-        sql << " ORDER BY message_id DESC LIMIT " << limit;
+        sql += " ORDER BY message_id DESC LIMIT " + std::to_string(limit);
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, params, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL GetMessages failed: " << st.error_str();
             return results;   // 空结果
@@ -246,14 +227,13 @@ std::vector<MessageRecord> MessageDao::GetMessages(
 
 std::optional<MessageRecord> MessageDao::FindById(int64_t message_id) {
 
-    // --- MySQL 路径 (Phase 4) ---
+    // --- MySQL 路径 (Phase 4; 参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "SELECT " << kSelectRowColumns << " FROM messages "
-            << "WHERE message_id = " << message_id << " LIMIT 1";
+        const std::string sql = std::string("SELECT ") + kSelectRowColumns +
+            " FROM messages WHERE message_id = ? LIMIT 1";
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, {message_id}, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL FindById failed: " << st.error_str();
             return std::nullopt;
@@ -280,15 +260,16 @@ int MessageDao::AckMessages(int32_t peer_type, int64_t peer_id,
     // 与内存语义一致: status < new_status 只升不降 (DELIVERED→READ / SENT→DELIVERED
     // 都会被计入; 已到更高状态的不会被降级, 也不会被重复计数)
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "UPDATE messages SET status = " << new_status
-            << " WHERE to_peer_type = " << peer_type
-            << " AND to_peer_id = " << peer_id
-            << " AND message_id <= " << max_ack_msg_id
-            << " AND status < " << new_status;
+        const std::string sql =
+            "UPDATE messages SET status = ? "
+            "WHERE to_peer_type = ? AND to_peer_id = ? "
+            "AND message_id <= ? AND status < ?";
+        const std::vector<nova::SqlParam> params = {
+            new_status, peer_type, peer_id, max_ack_msg_id, new_status,
+        };
 
         int64_t affected = 0;
-        butil::Status st = mysql_->ExecuteAffected(sql.str(), &affected);
+        butil::Status st = mysql_->ExecutePreparedAffected(sql, params, &affected);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL AckMessages failed: " << st.error_str();
             return 0;
@@ -322,17 +303,18 @@ int MessageDao::AckMessages(int32_t peer_type, int64_t peer_id,
 
 std::vector<int64_t> MessageDao::GetAckedSenders(int32_t peer_type, int64_t peer_id,
                                                  int64_t max_ack_msg_id) {
-    // --- MySQL 路径 ---
+    // --- MySQL 路径 (参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "SELECT DISTINCT from_user_id FROM messages "
-            << "WHERE to_peer_type = " << peer_type
-            << " AND to_peer_id = " << peer_id
-            << " AND message_id <= " << max_ack_msg_id
-            << " AND from_peer_type = 1";   // 只通知用户类型发送者
+        const std::string sql =
+            "SELECT DISTINCT from_user_id FROM messages "
+            "WHERE to_peer_type = ? AND to_peer_id = ? "
+            "AND message_id <= ? AND from_peer_type = 1";   // 只通知用户类型发送者
+        const std::vector<nova::SqlParam> params = {
+            peer_type, peer_id, max_ack_msg_id,
+        };
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, params, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL GetAckedSenders failed: " << st.error_str();
             return {};
@@ -363,18 +345,18 @@ std::vector<int64_t> MessageDao::GetAckedSenders(int32_t peer_type, int64_t peer
 PeerSyncState MessageDao::GetSyncState(
         int32_t peer_type, int64_t peer_id) const {
 
-    // --- MySQL 路径 (Phase 4) ---
+    // --- MySQL 路径 (Phase 4; 参数化查询) ---
     // 单条聚合查询, 一次拿到三个统计量; 无 GROUP BY 的聚合恒返回 1 行
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "SELECT MAX(message_id) AS latest, "
-            << "MAX(IF(status >= 3, message_id, NULL)) AS last_ack, "
-            << "SUM(IF(status < 3, 1, 0)) AS unread "
-            << "FROM messages WHERE to_peer_type = " << peer_type
-            << " AND to_peer_id = " << peer_id;
+        const std::string sql =
+            "SELECT MAX(message_id) AS latest, "
+            "MAX(IF(status >= 3, message_id, NULL)) AS last_ack, "
+            "SUM(IF(status < 3, 1, 0)) AS unread "
+            "FROM messages WHERE to_peer_type = ? AND to_peer_id = ?";
+        const std::vector<nova::SqlParam> params = {peer_type, peer_id};
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, params, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL GetSyncState failed: " << st.error_str();
             return {0, 0, 0};
@@ -428,12 +410,12 @@ std::vector<PeerSyncState> MessageDao::GetSyncStates(
 bool MessageDao::IsDuplicate(const std::string& idempotency_key) const {
     if (idempotency_key.empty()) return false;   // 空 key 快速路径, 不进锁
 
-    // --- MySQL 路径 (Phase 4) ---
+    // --- MySQL 路径 (Phase 4; 参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
-        std::string sql = "SELECT COUNT(*) AS c FROM messages WHERE idempotency_key = '"
-                        + EscapeSql(idempotency_key) + "'";
+        const std::string sql =
+            "SELECT COUNT(*) AS c FROM messages WHERE idempotency_key = ?";
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql, &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, {idempotency_key}, &rows);
         if (!st.ok()) return false;
         if (!rows.empty() && rows[0].count("c") && rows[0].at("c") != "0") return true;
         return false;
@@ -463,20 +445,21 @@ size_t MessageDao::Count() const {
 std::vector<DialogEntry> MessageDao::GetDialogs(int64_t user_id, int32_t limit) {
     if (limit <= 0 || limit > 100) limit = 50;
 
-    // --- MySQL 路径 ---
+    // --- MySQL 路径 (参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
         // 双向收集对端: 我发出的 (to_peer) ∪ 发给我的 (from_peer), 每组取最新消息 ID
-        std::ostringstream sql;
-        sql << "SELECT p_type, p_id, MAX(message_id) AS latest FROM ("
-            << "SELECT to_peer_type AS p_type, to_peer_id AS p_id, message_id "
-            << "FROM messages WHERE from_peer_type = 1 AND from_user_id = " << user_id
-            << " UNION ALL "
-            << "SELECT from_peer_type AS p_type, from_user_id AS p_id, message_id "
-            << "FROM messages WHERE to_peer_type = 1 AND to_peer_id = " << user_id
-            << ") t GROUP BY p_type, p_id ORDER BY latest DESC LIMIT " << limit;
+        const std::string sql =
+            "SELECT p_type, p_id, MAX(message_id) AS latest FROM ("
+            "SELECT to_peer_type AS p_type, to_peer_id AS p_id, message_id "
+            "FROM messages WHERE from_peer_type = 1 AND from_user_id = ? "
+            " UNION ALL "
+            "SELECT from_peer_type AS p_type, from_user_id AS p_id, message_id "
+            "FROM messages WHERE to_peer_type = 1 AND to_peer_id = ?"
+            ") t GROUP BY p_type, p_id ORDER BY latest DESC LIMIT " + std::to_string(limit);
+        const std::vector<nova::SqlParam> params = {user_id, user_id};
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, params, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL GetDialogs failed: " << st.error_str();
             return {};
@@ -525,23 +508,27 @@ std::vector<MessageRecord> MessageDao::GetConversation(
     std::vector<MessageRecord> results;
     if (limit <= 0 || limit > 100) limit = 50;
 
-    // --- MySQL 路径 ---
+    // --- MySQL 路径 (参数化查询) ---
     if (mysql_ && mysql_->IsReady()) {
-        std::ostringstream sql;
-        sql << "SELECT " << kSelectRowColumns << " FROM messages WHERE ("
-            << "(from_peer_type = 1 AND from_user_id = " << me
-            << " AND to_peer_type = " << peer_type << " AND to_peer_id = " << peer_id << ")"
-            << " OR "
-            << "(from_peer_type = " << peer_type << " AND from_user_id = " << peer_id
-            << " AND to_peer_type = 1 AND to_peer_id = " << me << ")"
-            << ")";
+        std::string sql = std::string("SELECT ") + kSelectRowColumns + " FROM messages WHERE ("
+            "(from_peer_type = 1 AND from_user_id = ? "
+            " AND to_peer_type = ? AND to_peer_id = ?)"
+            " OR "
+            "(from_peer_type = ? AND from_user_id = ? "
+            " AND to_peer_type = 1 AND to_peer_id = ?)"
+            ")";
+        std::vector<nova::SqlParam> params = {
+            me, peer_type, peer_id,
+            peer_type, peer_id, me,
+        };
         if (offset_id > 0) {
-            sql << " AND message_id < " << offset_id;   // 游标: 只取更旧的
+            sql += " AND message_id < ?";   // 游标: 只取更旧的
+            params.emplace_back(offset_id);
         }
-        sql << " ORDER BY message_id DESC LIMIT " << limit;
+        sql += " ORDER BY message_id DESC LIMIT " + std::to_string(limit);
 
         std::vector<nova::Row> rows;
-        butil::Status st = mysql_->QueryAll(sql.str(), &rows);
+        butil::Status st = mysql_->QueryAllPrepared(sql, params, &rows);
         if (!st.ok()) {
             NOVA_LOG_ERROR << "MessageDao: MySQL GetConversation failed: " << st.error_str();
             return results;

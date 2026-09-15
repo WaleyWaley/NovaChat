@@ -36,10 +36,6 @@ constexpr int     kSequenceBits     = 12;
 constexpr int64_t kMaxWorkerId      = (1LL << kWorkerIdBits) - 1;   // 1023
 constexpr int64_t kMaxSequence      = (1LL << kSequenceBits) - 1;   // 4095
 
-// --- Token ---
-constexpr int64_t kAccessTokenTTL   = 3600;     // 1 小时 (秒)
-constexpr int64_t kRefreshTokenTTL  = 2592000;  // 30 天 (秒)
-
 // --- 在线路由 ---
 constexpr int kSessionRouteTTL      = 30;       // Redis 在线路由表 TTL (秒)
 constexpr int kHeartbeatInterval    = 15;       // 网关心跳刷新间隔 (秒)

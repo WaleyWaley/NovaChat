@@ -1,13 +1,13 @@
 /**
  * MessageService HTTP 客户端 — 网关调用 C++ message-service
  *
- * 通过普通 HTTP POST 调用 bRPC 的 http+pb 端点。
- * 不需要引入 protobuf 库，直接发 JSON body。
+ * 复用 BrpcClient (与 user_client 同模式): 统一超时 (5s)、错误分类 (408/503)、
+ * 调用日志与 int64 精度安全解析。
  */
 
-import { config } from "../config/index.js";
+import { BrpcClient } from "./base.js";
+import { getServiceUrl, getFullServiceName } from "./service_registry.js";
 import { logger } from "../utils/logger.js";
-import { parseBrpcJson } from "./base.js";
 
 // ---- 类型 (与 message.proto 对齐) ----
 
@@ -106,51 +106,44 @@ export interface GetConversationResp {
 
 // ---- Client ----
 
-const SERVICE_URL = config.MESSAGE_SERVICE_URL;
-const SERVICE_PATH = "/nova.message.MessageService";
+export class MessageClient {
+  private readonly client: BrpcClient;
+  private readonly serviceName: string;
 
-async function callRpc<T>(method: string, body: unknown): Promise<T> {
-  const url = `${SERVICE_URL}${SERVICE_PATH}/${method}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`MessageService ${method} failed: HTTP ${response.status}`);
+  constructor(messageServiceUrl?: string) {
+    this.client = new BrpcClient(messageServiceUrl ?? getServiceUrl("message-service"));
+    this.serviceName = getFullServiceName("message-service");
   }
 
-  return parseBrpcJson(await response.text()) as T;
-}
+  private call<TReq extends object, TResp>(method: string, body: TReq): Promise<TResp> {
+    return this.client.call<TReq, TResp>(this.serviceName, method, body);
+  }
 
-// ---- 公开方法 ----
-
-export const messageClient = {
   /** 发送消息 */
   async sendMessage(req: SendMessageReq): Promise<SendMessageResp> {
     logger.debug({ to: req.to_peer.id }, "Sending message via message-service");
-    return callRpc<SendMessageResp>("SendMessage", req);
-  },
+    return this.call<SendMessageReq, SendMessageResp>("SendMessage", req);
+  }
 
   /** 拉取消息历史 (Timeline) */
   async getMessages(req: GetMessagesReq): Promise<GetMessagesResp> {
-    return callRpc<GetMessagesResp>("GetMessages", req);
-  },
+    return this.call<GetMessagesReq, GetMessagesResp>("GetMessages", req);
+  }
 
   /** 确认消息已读/送达 (Phase 4: 转发客户端 read 回执) */
   async ackMessage(req: AckMessageReq): Promise<AckMessageResp> {
-    return callRpc<AckMessageResp>("AckMessage", req);
-  },
+    return this.call<AckMessageReq, AckMessageResp>("AckMessage", req);
+  }
 
   /** 会话列表 (Phase 4.2: 客户端刷新后恢复) */
   async getDialogs(userId: string | number): Promise<GetDialogsResp> {
-    return callRpc<GetDialogsResp>("GetDialogs", { user_id: userId, limit: 100 });
-  },
+    return this.call<object, GetDialogsResp>("GetDialogs", { user_id: userId, limit: 100 });
+  }
 
   /** 双向会话历史 (Phase 4.2) */
   async getConversation(req: GetConversationReq): Promise<GetConversationResp> {
-    return callRpc<GetConversationResp>("GetConversation", req);
-  },
-};
+    return this.call<GetConversationReq, GetConversationResp>("GetConversation", req);
+  }
+}
+
+export const messageClient = new MessageClient();

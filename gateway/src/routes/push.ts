@@ -7,13 +7,17 @@
  * Phase 2.3: IsUserOnline / BatchOnlineCheck 升级为全局在线查询
  *   - 先查本地 ConnectionManager
  *   - 本地不在线时查 Redis 在线路由表 (用户可能在另一个网关上)
+ *
+ * Phase 5.1: PushUpdate / PushToUsers 接入统一投递管线 (ws/push_delivery.ts),
+ *   本地不在线时跨网关转发 (一跳限); 请求体字段名统一归一化 (bRPC json2pb
+ *   输出 camelCase, 网关兼容两种命名)。
  */
 
 import type { FastifyInstance } from "fastify";
 import { connectionManager } from "../ws/connection.js";
 import { gatewayRedis } from "../redis/client.js";
 import { logger } from "../utils/logger.js";
-import { buildUpdate, buildKicked } from "../ws/protocol.js";
+import { deliverUpdateToUser } from "../ws/push_delivery.js";
 
 // ---- 请求/响应类型 (与 push.proto 对齐) ----
 
@@ -26,6 +30,8 @@ interface PushUpdateReq {
   skip_offline?: boolean;
   push_id?: string | number;  // 雪花 int64: proto3 JSON 映射按字符串传输
   ttl_seconds?: number;
+  /** 网关间转发标记 — 转发的请求只投本地, 不再转发 (防环) */
+  no_forward?: boolean;
 }
 
 interface PushUpdateResp {
@@ -44,6 +50,7 @@ interface PushToUsersReq {
   skip_offline?: boolean;
   push_id?: string | number;  // 雪花 int64: proto3 JSON 映射按字符串传输
   ttl_seconds?: number;
+  no_forward?: boolean;
 }
 
 interface PushToUsersResp {
@@ -99,6 +106,30 @@ interface NotifyGatewayResp {
   error_message: string;
 }
 
+// ---- 请求体归一化 ----
+
+/**
+ * bRPC json2pb 输出的字段名是 camelCase (C++ 侧未设 preserve_proto_field_names),
+ * 但兼容 snake_case 调用方。统一转 snake_case 后 handler 只读一种名字。
+ *
+ * 注意: 只转顶层请求字段; update 内的业务数据是透传给客户端的不透明数据,
+ * 严禁深度转换 (否则下发给浏览器的字段名会被改坏)。
+ */
+function normalizeBody(body: unknown): Record<string, unknown> {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const toSnake = (s: string) => s.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) out[toSnake(k)] = v;
+  return out;
+}
+
+/** 从归一化后的 update 对象拆出 type 与透传数据 */
+function splitUpdate(update: unknown): { type: number; data: Record<string, unknown> } {
+  const u = (update ?? {}) as Record<string, unknown>;
+  const { type: _t, ...data } = u;
+  return { type: ((u as Record<string, unknown>).type as number) || 0, data: data as Record<string, unknown> };
+}
+
 // ---- 路由注册 ----
 
 const SERVICE_PATH = "/nova.gateway.PushService";
@@ -108,9 +139,12 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: PushUpdateReq }>(
     `${SERVICE_PATH}/PushUpdate`,
     async (request) => {
-      // bRPC json2pb 输出 camelCase, Fastify 解析后字段名是 camelCase
-      const target_user_id = (request.body as any).target_user_id ?? (request.body as any).targetUserId;
-      const { update, skip_offline, push_id } = request.body as any;
+      const body = normalizeBody(request.body);
+      const target_user_id = body.target_user_id as string | number;
+      const update = body.update;
+      const skip_offline = (body.skip_offline as boolean | undefined) ?? false;
+      const push_id = body.push_id as string | number | undefined;
+      const no_forward = (body.no_forward as boolean | undefined) ?? false;
 
       // 幂等去重
       if (push_id && connectionManager.isDuplicatePush(push_id)) {
@@ -123,36 +157,17 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
         } as PushUpdateResp;
       }
 
-      // 跳过离线时的推送 (如 typing 指示)
-      if (skip_offline && !connectionManager.isOnline(String(target_user_id))) {
-        return {
-          error_code: 0,
-          error_message: "",
-          delivered: false,
-          push_id: push_id ?? 0,
-        } as PushUpdateResp;
-      }
-
-      const { type: _t, ...data } = update as Record<string, unknown>;
-      const serverMsg = buildUpdate((update as any).type || 0, data);
-      // 先获取所有在线用户, 再检查目标是否在其中
-      const onlineIds = connectionManager.getOnlineUserIds();
-      const isOnline = connectionManager.isOnline(String(target_user_id));
-      logger.info({ target: target_user_id, isOnline, onlineCount: onlineIds.length, targetInList: onlineIds.includes(String(target_user_id)) }, "PushUpdate");
-      let delivered = connectionManager.sendToUser(String(target_user_id), serverMsg);
-
-      // 推送失败时重试一次 (用户可能正在重连)
-      if (!delivered) {
-        setTimeout(() => {
-          const retryOk = connectionManager.sendToUser(String(target_user_id), serverMsg);
-          logger.info({ target: target_user_id, retryOk }, "PushUpdate retry result");
-        }, 1500);
-      }
+      const { type, data } = splitUpdate(update);
+      const result = await deliverUpdateToUser(target_user_id, type, data, {
+        skipOffline: skip_offline,
+        noForward: no_forward,
+        pushId: push_id,
+      });
 
       return {
         error_code: 0,
         error_message: "",
-        delivered,
+        delivered: result.delivered,
         push_id: push_id ?? 0,
       } as PushUpdateResp;
     }
@@ -162,25 +177,35 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: PushToUsersReq }>(
     `${SERVICE_PATH}/PushToUsers`,
     async (request) => {
-      const target_user_ids = (request.body as any).target_user_ids ?? (request.body as any).targetUserIds;
-      const { update, push_id } = request.body as any;
+      const body = normalizeBody(request.body);
+      const target_user_ids = (body.target_user_ids as (string | number)[]) ?? [];
+      const update = body.update;
+      const skip_offline = (body.skip_offline as boolean | undefined) ?? false;
+      const push_id = body.push_id as string | number | undefined;
+      const no_forward = (body.no_forward as boolean | undefined) ?? false;
 
       if (push_id && connectionManager.isDuplicatePush(push_id)) {
         return {
           error_code: 0,
           error_message: "",
-          delivered_user_ids: target_user_ids,
+          delivered_user_ids: target_user_ids.map(String),
           missed_user_ids: [],
           push_id,
         } as PushToUsersResp;
       }
 
-      const { type: _t, ...data } = update as Record<string, unknown>;
-      const serverMsg = buildUpdate((update as any).type || 0, data);
-      const [delivered, missed] = connectionManager.sendToUsers(
-        target_user_ids,
-        serverMsg
-      );
+      const { type, data } = splitUpdate(update);
+      const delivered: string[] = [];
+      const missed: string[] = [];
+      for (const id of target_user_ids) {
+        const result = await deliverUpdateToUser(id, type, data, {
+          skipOffline: skip_offline,
+          noForward: no_forward,
+          pushId: push_id,
+        });
+        if (result.delivered) delivered.push(String(id));
+        else missed.push(String(id));
+      }
 
       return {
         error_code: 0,
@@ -196,7 +221,10 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: KickUserReq }>(
     `${SERVICE_PATH}/KickUser`,
     async (request) => {
-      const { user_id, reason, message } = request.body;
+      const body = normalizeBody(request.body);
+      const user_id = body.user_id as number;
+      const reason = body.reason as number;
+      const message = body.message as string | undefined;
 
       const msg = message ?? getDefaultKickMessage(reason);
       const kicked = connectionManager.kickUser(user_id, reason, msg);
@@ -220,7 +248,8 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: IsUserOnlineReq }>(
     `${SERVICE_PATH}/IsUserOnline`,
     async (request) => {
-      const { user_id } = request.body;
+      const body = normalizeBody(request.body);
+      const user_id = body.user_id as number;
 
       // 1. 先查本地 ConnectionManager (最快)
       if (connectionManager.isOnline(user_id)) {
@@ -259,7 +288,8 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: BatchOnlineCheckReq }>(
     `${SERVICE_PATH}/BatchOnlineCheck`,
     async (request) => {
-      const { user_ids } = request.body;
+      const body = normalizeBody(request.body);
+      const user_ids = (body.user_ids as string[]) ?? [];
 
       const online: string[] = [];
       const offline: string[] = [];
@@ -305,7 +335,9 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: NotifyGatewayReq }>(
     `${SERVICE_PATH}/NotifyGateway`,
     async (request) => {
-      const { event, user_id } = request.body;
+      const body = normalizeBody(request.body);
+      const event = body.event as number;
+      const user_id = body.user_id as number | undefined;
 
       logger.info({ event, user_id }, "Gateway notification received");
 

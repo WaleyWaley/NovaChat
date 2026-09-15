@@ -4,7 +4,9 @@
 // NovaChat — UserDao (用户数据访问层)
 //
 // Phase 1: 内存模拟存储 (std::unordered_map)
-// Phase 2: 替换为 MySQL + Redis 真实持久化
+// Phase 2: MySQL 真实持久化
+//
+// 注: 会话/Redis 已移除 — 鉴权统一由网关负责 (BFF 模式), 本层只存用户数据。
 // =============================================================================
 
 #include <string>
@@ -15,7 +17,6 @@
 
 #include "nova/common.h"
 #include "nova/mysql_pool.h"
-#include "nova/redis_client.h"
 
 // proto 生成的头文件
 #include "nova/common/common.pb.h"
@@ -40,16 +41,6 @@ struct UserRecord {
     bool     is_deleted = false;
 };
 
-// 内部存储的会话记录
-struct SessionRecord {
-    int64_t     user_id;
-    std::string refresh_token;
-    std::string device_type;
-    std::string device_name;
-    int64_t     created_at;
-    int64_t     expires_at;
-};
-
 class UserDao {
 public:
     UserDao() = default;
@@ -63,10 +54,6 @@ public:
     bool InitMySql(const std::string& addr, int port,
                    const std::string& user, const std::string& passwd,
                    const std::string& db, int pool_size = 8);
-
-    // Phase 2: 初始化 Redis 客户端
-    bool InitRedis(const std::string& addr, int port,
-                   const std::string& password = "");
 
     // ==================== 用户 CRUD ====================
 
@@ -114,42 +101,26 @@ public:
     // 批量获取用户
     std::vector<UserRecord> GetUsersByIds(const std::vector<int64_t>& user_ids);
 
-    // ==================== Session 管理 ====================
-
-    // 创建 Session
-    void CreateSession(const SessionRecord& session);
-
-    // 按 refresh_token 查找 Session
-    std::optional<SessionRecord> FindSession(const std::string& refresh_token);
-
-    // 删除 Session (Logout / Token 轮转)
-    void DeleteSession(const std::string& refresh_token);
-
-    // 删除用户的所有 Session (多端互踢 / 账户注销)
-    void DeleteAllSessions(int64_t user_id);
-
     // ==================== 工具 ====================
 
-    // Phase 2: MySQL / Redis 连接是否就绪
-    bool IsStorageReady() const { return mysql_ != nullptr && redis_ != nullptr; }
+    // Phase 2: MySQL 连接是否就绪
+    bool IsStorageReady() const { return mysql_ != nullptr; }
 
     // 当前存储模式
     std::string StorageMode() const {
-        return IsStorageReady() ? "mysql+redis" : "in-memory (Phase 1)";
+        return IsStorageReady() ? "mysql" : "in-memory (Phase 1)";
     }
 
 private:
     // Phase 1: 内存存储
     std::unordered_map<int64_t, UserRecord>    users_by_id_;
     std::unordered_map<std::string, int64_t>   users_by_username_;  // username → user_id
-    std::unordered_map<std::string, SessionRecord> sessions_;       // refresh_token → session
     std::mutex mu_;
 
     int64_t next_user_id_ = 1000;  // Phase 1 简单自增 (Phase 2 由 Snowflake 替代)
 
     // Phase 2: 持久化存储 (unique_ptr for optional ownership)
     std::unique_ptr<nova::MySqlPool>  mysql_;
-    std::unique_ptr<nova::RedisClient> redis_;
 };
 
 }  // namespace user

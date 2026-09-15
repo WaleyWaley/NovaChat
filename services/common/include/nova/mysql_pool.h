@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <queue>
 #include <map>
+#include <variant>
 
 #include <butil/status.h>
 #include <bthread/countdown_event.h>
@@ -36,6 +37,9 @@
 namespace nova {
 
 using Row = std::map<std::string, std::string>;
+
+// SQL 参数值 (参数化查询用): 目前 DAO 只用 string / int64
+using SqlParam = std::variant<std::string, int64_t>;
 
 class MySqlPool {
 public:
@@ -66,6 +70,29 @@ public:
     // 查询并返回所有行
     butil::Status QueryAll(const std::string& sql, std::vector<Row>* rows);
 
+    // ==================== 参数化查询 (Prepared Statement) =====================
+    //
+    // SQL 中的用户输入一律用 ? 占位, 参数经 mysql_stmt_bind_param 绑定 —
+    // 数据与 SQL 结构完全分离, 杜绝注入 (手工转义在 NO_BACKSLASH_ESCAPES
+    // sql_mode 下会失效, 不可依赖)。
+    //
+    // 错误码约定: 失败时 Status.error_code() = -mysql_errno (如 -1062 = 唯一键冲突),
+    // error_str() 为 mysql 错误信息。调用方可据此区分"重复"与"其他错误"。
+
+    // 参数化写操作
+    butil::Status ExecutePrepared(const std::string& sql,
+                                  const std::vector<SqlParam>& params);
+
+    // 参数化写操作 + 受影响行数
+    butil::Status ExecutePreparedAffected(const std::string& sql,
+                                          const std::vector<SqlParam>& params,
+                                          int64_t* affected);
+
+    // 参数化查询, 返回所有行
+    butil::Status QueryAllPrepared(const std::string& sql,
+                                   const std::vector<SqlParam>& params,
+                                   std::vector<Row>* rows);
+
     bool IsReady() const { return ready_; }
     const std::string& Database() const { return db_; }
 
@@ -82,11 +109,15 @@ private:
         std::function<void(const Row&)>* row_cb;  // Query 回调
         std::mutex* cb_mutex;             // 回调线程安全锁
         int64_t* affected;                // ExecuteAffected 用: 受影响行数
+        const std::vector<SqlParam>* params;  // 非空 → mysql_stmt 参数化执行
     };
 
     // 获取一个空闲连接 (阻塞直到有可用连接)
     MYSQL* AcquireConnection();
     void ReleaseConnection(MYSQL* conn);
+
+    // 参数化任务执行 (mysql_stmt 路径, 在工作线程上运行)
+    void ExecutePreparedTask(MYSQL* conn, const Task& task);
 
     // 工作线程: 从队列取任务, 执行同步 MySQL 调用, 完成后唤醒 bthread
     void WorkerThread(int worker_id);
@@ -111,6 +142,10 @@ private:
 
     std::string db_;
     bool ready_ = false;
+
+    // 连接重建参数 (探活失败时用)
+    std::string addr_, user_, passwd_;
+    int port_ = 0;
 };
 
 }  // namespace nova

@@ -1,8 +1,11 @@
 // =============================================================================
-// NovaChat — UserServiceImpl 实现 (12 RPCs)
+// NovaChat — UserServiceImpl 实现 (10 RPCs)
 //
 // Phase 1: 功能性桩实现, 使用内存存储
-// Phase 2: MySQL + Redis 持久化, PBKDF2 密码哈希; Token 仍为简化格式 (JWT 待接入)
+// Phase 2: MySQL 持久化, PBKDF2 密码哈希
+//
+// 鉴权设计 (BFF 模式): user-service 只做凭证验证 (注册/登录), 不签发 token、
+// 不管理会话 — JWT 签发/验证/刷新统一由网关负责, C++ 服务保持无状态。
 // =============================================================================
 
 #include "user_service_impl.h"
@@ -24,24 +27,6 @@ UserServiceImpl::UserServiceImpl(nova::Snowflake* snowflake, UserDao* user_dao)
     : snowflake_(snowflake), user_dao_(user_dao) {
     NOVA_LOG_INFO << "UserServiceImpl created (storage: "
                   << user_dao_->StorageMode() << ")";
-}
-
-std::string UserServiceImpl::GenerateToken(int64_t user_id,
-                                           const std::string& device_type) {
-    // Phase 1: 简化 Token (Phase 2: 替换为完整 JWT RS256)
-    int64_t ts = nova::NowMs();
-    int64_t seq = snowflake_->NextId();
-    std::ostringstream oss;
-    oss << "tok_" << std::hex << user_id << "_" << ts << "_" << seq;
-    return oss.str();
-}
-
-std::string UserServiceImpl::GenerateRefreshToken(int64_t user_id) {
-    // Phase 1: 简化 Refresh Token
-    int64_t seq = snowflake_->NextId();
-    std::ostringstream oss;
-    oss << "rt_" << std::hex << user_id << "_" << nova::NowMs() << "_" << seq;
-    return oss.str();
 }
 
 bool UserServiceImpl::ValidateUsername(const std::string& username,
@@ -157,26 +142,9 @@ void UserServiceImpl::Register(::google::protobuf::RpcController* controller,
         return;
     }
 
-    // --- 生成 Token (注册即登录) ---
-    std::string access_token = GenerateToken(user_id, "");
-    std::string refresh_token = GenerateRefreshToken(user_id);
-
-    int64_t expires_at = now + nova::kAccessTokenTTL * 1000;
-
-    // 保存 Session
-    SessionRecord session;
-    session.user_id       = user_id;
-    session.refresh_token = refresh_token;
-    session.created_at    = now;
-    session.expires_at    = now + nova::kRefreshTokenTTL * 1000;
-    user_dao_->CreateSession(session);
-
-    // --- 填充响应 ---
+    // --- 填充响应 (无 token: 鉴权由网关统一签发 JWT) ---
     response->set_error_code(::nova::common::OK);
     response->set_user_id(user_id);
-    response->set_access_token(access_token);
-    response->set_refresh_token(refresh_token);
-    response->set_expires_at(expires_at);
     FillUserProfile(*record, response->mutable_user());
 
     NOVA_LOG_INFO << "User registered: id=" << user_id
@@ -211,104 +179,15 @@ void UserServiceImpl::Login(::google::protobuf::RpcController* controller,
         return;
     }
 
-    // --- 生成 Token ---
-    int64_t now = nova::NowMs();
-    std::string access_token = GenerateToken(record->user_id, request->device_type());
-    std::string refresh_token = GenerateRefreshToken(record->user_id);
-
-    int64_t expires_at = now + nova::kAccessTokenTTL * 1000;
-
-    // 保存 Session
-    SessionRecord session;
-    session.user_id       = record->user_id;
-    session.refresh_token = refresh_token;
-    session.device_type   = request->device_type();
-    session.device_name   = request->device_name();
-    session.created_at    = now;
-    session.expires_at    = now + nova::kRefreshTokenTTL * 1000;
-    user_dao_->CreateSession(session);
-
-    // --- 填充响应 ---
+    // --- 填充响应 (无 token: 鉴权由网关统一签发 JWT) ---
     response->set_error_code(::nova::common::OK);
-    response->set_access_token(access_token);
-    response->set_refresh_token(refresh_token);
-    response->set_expires_at(expires_at);
     FillUserProfile(*record, response->mutable_user());
 
     NOVA_LOG_INFO << "User logged in: id=" << record->user_id
                   << " device=" << request->device_type();
 }
 
-// ============================= 3. RefreshToken ================================
-
-void UserServiceImpl::RefreshToken(::google::protobuf::RpcController* controller,
-                                   const ::nova::user::RefreshTokenReq* request,
-                                   ::nova::user::RefreshTokenResp* response,
-                                   ::google::protobuf::Closure* done) {
-    brpc::ClosureGuard done_guard(done);
-
-    NOVA_LOG_INFO << "RefreshToken request";
-
-    // --- 查找 Session ---
-    auto session = user_dao_->FindSession(request->refresh_token());
-    if (!session) {
-        response->set_error_code(::nova::common::TOKEN_INVALID);
-        response->set_error_message("Invalid or expired refresh token");
-        return;
-    }
-
-    // --- 检查是否过期 ---
-    int64_t now = nova::NowMs();
-    if (session->expires_at < now) {
-        user_dao_->DeleteSession(request->refresh_token());
-        response->set_error_code(::nova::common::SESSION_EXPIRED);
-        response->set_error_message("Refresh token expired");
-        return;
-    }
-
-    // --- Token 轮转: 删除旧 token, 生成新 token ---
-    user_dao_->DeleteSession(request->refresh_token());
-
-    std::string new_access_token = GenerateToken(session->user_id, session->device_type);
-    std::string new_refresh_token = GenerateRefreshToken(session->user_id);
-
-    SessionRecord new_session;
-    new_session.user_id       = session->user_id;
-    new_session.refresh_token = new_refresh_token;
-    new_session.device_type   = session->device_type;
-    new_session.device_name   = session->device_name;
-    new_session.created_at    = now;
-    new_session.expires_at    = now + nova::kRefreshTokenTTL * 1000;
-    user_dao_->CreateSession(new_session);
-
-    // --- 填充响应 ---
-    response->set_error_code(::nova::common::OK);
-    response->set_access_token(new_access_token);
-    response->set_refresh_token(new_refresh_token);
-    response->set_expires_at(now + nova::kAccessTokenTTL * 1000);
-
-    NOVA_LOG_INFO << "Token refreshed for user_id=" << session->user_id;
-}
-
-// ============================= 4. Logout ======================================
-
-void UserServiceImpl::Logout(::google::protobuf::RpcController* controller,
-                             const ::nova::user::LogoutReq* request,
-                             ::nova::user::LogoutResp* response,
-                             ::google::protobuf::Closure* done) {
-    brpc::ClosureGuard done_guard(done);
-
-    NOVA_LOG_INFO << "Logout user_id=" << request->user_id();
-
-    // 删除该用户的所有 Session
-    user_dao_->DeleteAllSessions(request->user_id());
-
-    response->set_error_code(::nova::common::OK);
-
-    NOVA_LOG_INFO << "User logged out: id=" << request->user_id();
-}
-
-// ============================= 5. GetUserProfile ==============================
+// ============================= 3. GetUserProfile ==============================
 
 void UserServiceImpl::GetUserProfile(::google::protobuf::RpcController* controller,
                                      const ::nova::user::GetUserProfileReq* request,
@@ -346,7 +225,7 @@ void UserServiceImpl::GetUserProfile(::google::protobuf::RpcController* controll
     response->mutable_user()->clear_phone();
 }
 
-// ============================= 6. GetUsers ====================================
+// ============================= 4. GetUsers ====================================
 
 void UserServiceImpl::GetUsers(::google::protobuf::RpcController* controller,
                                const ::nova::user::GetUsersReq* request,
@@ -379,7 +258,7 @@ void UserServiceImpl::GetUsers(::google::protobuf::RpcController* controller,
     }
 }
 
-// ============================= 7. UpdateProfile ===============================
+// ============================= 5. UpdateProfile ===============================
 
 void UserServiceImpl::UpdateProfile(::google::protobuf::RpcController* controller,
                                     const ::nova::user::UpdateProfileReq* request,
@@ -430,7 +309,7 @@ void UserServiceImpl::UpdateProfile(::google::protobuf::RpcController* controlle
     }
 }
 
-// ============================= 8. ChangeUsername ==============================
+// ============================= 6. ChangeUsername ==============================
 
 void UserServiceImpl::ChangeUsername(::google::protobuf::RpcController* controller,
                                      const ::nova::user::ChangeUsernameReq* request,
@@ -488,7 +367,7 @@ void UserServiceImpl::ChangeUsername(::google::protobuf::RpcController* controll
     response->set_username(request->new_username());
 }
 
-// ============================= 9. CheckUsername ===============================
+// ============================= 7. CheckUsername ===============================
 
 void UserServiceImpl::CheckUsername(::google::protobuf::RpcController* controller,
                                     const ::nova::user::CheckUsernameReq* request,
@@ -511,7 +390,7 @@ void UserServiceImpl::CheckUsername(::google::protobuf::RpcController* controlle
     response->set_is_available(available);
 }
 
-// ============================= 10. ChangePassword =============================
+// ============================= 8. ChangePassword =============================
 
 void UserServiceImpl::ChangePassword(::google::protobuf::RpcController* controller,
                                      const ::nova::user::ChangePasswordReq* request,
@@ -550,8 +429,7 @@ void UserServiceImpl::ChangePassword(::google::protobuf::RpcController* controll
         return;
     }
 
-    // 安全措施: 清除所有 Session, 强制重新登录
-    user_dao_->DeleteAllSessions(request->user_id());
+    // 注: 会话失效 (强制重新登录) 由网关 sessionStore 负责 — 本服务无状态
 
     response->set_error_code(::nova::common::OK);
 
@@ -559,7 +437,7 @@ void UserServiceImpl::ChangePassword(::google::protobuf::RpcController* controll
                   << " (all sessions cleared)";
 }
 
-// ============================= 11. SearchUsers ================================
+// ============================= 9. SearchUsers ================================
 
 void UserServiceImpl::SearchUsers(::google::protobuf::RpcController* controller,
                                   const ::nova::user::SearchUsersReq* request,
@@ -598,7 +476,7 @@ void UserServiceImpl::SearchUsers(::google::protobuf::RpcController* controller,
     NOVA_LOG_INFO << "SearchUsers found " << records.size() << " users";
 }
 
-// ============================= 12. DeleteAccount ==============================
+// ============================= 10. DeleteAccount ==============================
 
 void UserServiceImpl::DeleteAccount(::google::protobuf::RpcController* controller,
                                     const ::nova::user::DeleteAccountReq* request,
@@ -629,8 +507,7 @@ void UserServiceImpl::DeleteAccount(::google::protobuf::RpcController* controlle
         return;
     }
 
-    // 清除所有 Session
-    user_dao_->DeleteAllSessions(request->user_id());
+    // 注: 会话失效由网关 sessionStore 负责 — 本服务无状态
 
     response->set_error_code(::nova::common::OK);
 

@@ -58,9 +58,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         return reply.send(result);
       }
 
-      // 签发网关自己的 JWT (与 login 一致)。
-      // 之前直接透传 user-service 的 tok_ 不透明 token,
-      // 前端拿它做 WS auth 会被 verifyAccessToken 判为 "jwt malformed"。
+      // BFF 模式: user-service 只做凭证验证, JWT 由网关统一签发
+      // (前端拿它做 HTTP Bearer 与 WS auth 认证)
       const { signToken } = await import("../auth/jwt.js");
       const user = result.user || { user_id: result.user_id, username };
       const jwtResult = signToken({
@@ -107,7 +106,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         return reply.send(result);
       }
 
-      // 签发网关自己的 JWT (用 user-service 返回的 user_id)
+      // BFF 模式: user-service 只做凭证验证, JWT 由网关统一签发
       const { signToken } = await import("../auth/jwt.js");
       const user = result.user || { user_id: 0, username };
       const jwtResult = signToken({
@@ -129,10 +128,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
    * POST /api/auth/refresh
    * 刷新 Token (Token 轮转)
    *
-   * 说明: 登录/注册时签发的是网关自己的 JWT 对 (access + refresh),
-   * 因此刷新也由网关自己验证 (verifyRefreshToken) 并换发, 不再转发给
-   * user-service — C++ 侧只认识它自己签发的 rt_ 不透明 token, 透传会
-   * 因找不到 session 而失败, 且换回的 tok_ token 又会被本网关判为无效。
+   * BFF 模式: JWT 由网关统一签发与验证, 刷新也完全在网关内完成 —
+   * 沿用原 session_id 保证会话连续性, 换发新的 access + refresh (轮转)。
    */
   app.post<{ Body: { refresh_token: string } }>(
     "/api/auth/refresh",
@@ -217,13 +214,13 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Phase 2.1: 注销当前 session 和该用户的所有 session
+    // (user-service 无会话状态 — BFF 模式下注销只在网关内完成)
     if (sessionId) {
       await sessionStore.invalidate(sessionId);
     }
     await sessionStore.invalidateAllForUser(userId);
 
-    const result = await userClient.logout(userId);
-    return reply.send(result);
+    return reply.send({ error_code: 0, error_message: "" });
   });
 
   // =====================================================================

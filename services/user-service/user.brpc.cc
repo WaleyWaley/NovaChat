@@ -39,14 +39,6 @@ void UserServiceBase::CallMethod(
         Login(controller,
               static_cast<const LoginReq*>(request),
               static_cast<LoginResp*>(response), done);
-    } else if (method_name == "RefreshToken") {
-        RefreshToken(controller,
-                     static_cast<const RefreshTokenReq*>(request),
-                     static_cast<RefreshTokenResp*>(response), done);
-    } else if (method_name == "Logout") {
-        Logout(controller,
-               static_cast<const LogoutReq*>(request),
-               static_cast<LogoutResp*>(response), done);
     } else if (method_name == "GetUserProfile") {
         GetUserProfile(controller,
                        static_cast<const GetUserProfileReq*>(request),

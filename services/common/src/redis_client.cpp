@@ -186,7 +186,8 @@ butil::Status RedisClient::SendCommand(const std::string& cmd,
         return butil::Status(-1, "Redis error: " + err);
     }
 
-
+    // 成功路径必须显式返回 — 非 void 函数走到结尾是未定义行为 (编译警告即源于此)
+    return butil::Status::OK();
 }
 
 // ============================= Key/Value 操作 ================================

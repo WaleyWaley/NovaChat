@@ -10,6 +10,9 @@
  *   6. 注册 WebSocket 处理器 (客户端长连接)
  *   7. 启动 HTTP 服务器
  *   8. 优雅关闭
+ *
+ * WS 连接生命周期在此装配; 消息处理逻辑见 ws/handlers/ (auth / messaging /
+ * call_room / rpc), 单连接状态见 ws/client_session.ts。
  */
 
 import Fastify from "fastify";
@@ -27,17 +30,13 @@ import { avatarRoutes } from "./routes/avatar.js";
 import { connectionManager } from "./ws/connection.js";
 import { onlineRegistry } from "./ws/online_registry.js";
 import { gatewayRedis } from "./redis/client.js";
-import { signToken, verifyAccessToken } from "./auth/jwt.js";
 import { sessionStore } from "./auth/session.js";
+import { ClientSession } from "./ws/client_session.js";
 import {
   isClientMessage,
   getMessageType,
-  buildAuthOk,
   buildError,
-  buildPong,
   buildRpcResult,
-  buildCallSignal,
-  buildRoomSignal,
   type ClientMessage,
   type ClientAuthMessage,
   type ClientPingMessage,
@@ -48,9 +47,10 @@ import {
   type ClientCallSignal,
   type ClientRoomSignal,
 } from "./ws/protocol.js";
-import { userClient } from "./clients/user_client.js";
-import { messageClient } from "./clients/message_client.js";
-import { roomManager } from "./ws/room_manager.js";
+import { handleAuth, handlePing } from "./ws/handlers/auth.js";
+import { handleSendMessage, handleReadReceipt, handleTyping } from "./ws/handlers/messaging.js";
+import { handleCallSignal, handleRoomSignal } from "./ws/handlers/call_room.js";
+import { handleRpc } from "./ws/handlers/rpc.js";
 import type { WebSocket } from "ws";
 import type { FastifyRequest } from "fastify";
 
@@ -93,20 +93,15 @@ async function createApp() {
     "/ws",
     { websocket: true },
     (socket: WebSocket, req: FastifyRequest) => {
-      let authenticated = false;                    //身份认证
-      let currentUserId: string | number | null = null;      //当前用户ID (int64 经 base.ts 解析后为 string)
-      let currentUsername = "";                     //当前用户名
-      let currentSessionId: string | null = null;   //当前会话ID
+      const session = new ClientSession(socket);
 
       logger.info({ ip: req.ip }, "WebSocket connection established");
 
       // 发送欢迎帧 (提示客户端发送 auth)
-      socket.send(
-        JSON.stringify({
-          type: "welcome",
-          payload: { version: "0.1.0", message: "NovaChat Gateway" },
-        })
-      );
+      session.send({
+        type: "welcome",
+        payload: { version: "0.1.0", message: "NovaChat Gateway" },
+      });
 
       // ---- 消息处理 ----
       socket.on("message", (rawData: Buffer) => {
@@ -114,19 +109,13 @@ async function createApp() {
         try {
           msg = JSON.parse(rawData.toString());
         } catch {
-          socket.send(
-            JSON.stringify(
-              buildError(0, 1302, "Invalid JSON")
-            )
-          );
+          session.send(buildError(0, 1302, "Invalid JSON"));
           return;
         }
 
         if (!isClientMessage(msg)) {
-          socket.send(
-            JSON.stringify(
-              buildError(0, 1302, "Invalid message format: need {type, seq}")
-            )
+          session.send(
+            buildError(0, 1302, "Invalid message format: need {type, seq}")
           );
           return;
         }
@@ -135,80 +124,77 @@ async function createApp() {
         const msgType = getMessageType(clientMsg);
 
         // 未认证时只接受 auth 和 ping
-        if (!authenticated && msgType !== "auth" && msgType !== "ping") {
-          socket.send(
-            JSON.stringify(
-              buildError(clientMsg.seq, 1004, "Authentication required")
-            )
+        if (!session.authenticated && msgType !== "auth" && msgType !== "ping") {
+          session.send(
+            buildError(clientMsg.seq, 1004, "Authentication required")
           );
           return;
         }
 
         switch (msgType) {
           case "auth":
-            handleAuth(clientMsg as ClientAuthMessage, socket);
+            handleAuth(session, clientMsg as ClientAuthMessage);
             break;
           case "ping":
-            handlePing(clientMsg as ClientPingMessage, socket);
+            handlePing(session, clientMsg as ClientPingMessage);
             break;
           case "send_msg":
-            handleSendMessage(clientMsg as ClientSendMessage).catch((err) => {
+            handleSendMessage(session, clientMsg as ClientSendMessage).catch((err) => {
               logger.error({ err }, "send_msg handler error");
-              socket.send(JSON.stringify(buildRpcResult(clientMsg.seq, 5001, "Internal error", null)));
+              session.send(
+                buildRpcResult(clientMsg.seq, 5001, "Internal error", null)
+              );
             });
             break;
           case "typing":
-            handleTyping(clientMsg as ClientTypingMessage);
+            handleTyping(session, clientMsg as ClientTypingMessage);
             break;
           case "read":
-            handleReadReceipt(clientMsg as ClientReadReceiptMessage).catch((err) => {
+            handleReadReceipt(session, clientMsg as ClientReadReceiptMessage).catch((err) => {
               logger.error({ err }, "read receipt handler error");
             });
             break;
           case "call_signal":
-            handleCallSignal(clientMsg as ClientCallSignal);
+            handleCallSignal(session, clientMsg as ClientCallSignal);
             break;
           case "room_signal":
-            handleRoomSignal(clientMsg as ClientRoomSignal);
+            handleRoomSignal(session, clientMsg as ClientRoomSignal);
             break;
           case "rpc":
-            handleRpc(clientMsg as ClientRpcMessage, socket).catch((err) => {
+            handleRpc(session, clientMsg as ClientRpcMessage).catch((err) => {
               logger.error({ err }, "RPC proxy error");
-              socket.send(
-                JSON.stringify(
-                  buildRpcResult(
-                    clientMsg.seq,
-                    5001,
-                    err instanceof Error ? err.message : "Internal error",
-                    null
-                  )
+              session.send(
+                buildRpcResult(
+                  clientMsg.seq,
+                  5001,
+                  err instanceof Error ? err.message : "Internal error",
+                  null
                 )
               );
             });
             break;
           default:
-            socket.send(
-              JSON.stringify(
-                buildError(clientMsg.seq, 1302, `Unknown message type: ${msgType}`)
-              )
+            session.send(
+              buildError(clientMsg.seq, 1302, `Unknown message type: ${msgType}`)
             );
         }
       });
 
       // ---- 连接关闭 ----
       socket.on("close", (_code: number, _reason: Buffer) => {
-        if (authenticated && currentUserId !== null) {
+        session.clearExpiryTimer();
+        if (session.authenticated && session.userId !== null) {
           connectionManager.unregister(socket);
           // Phase 2.3: 通知 Redis 删除在线状态
-          onlineRegistry.onUserOffline(currentUserId).catch((err) => {
-            logger.error({ err, userId: currentUserId }, "Failed to unregister online status");
+          onlineRegistry.onUserOffline(session.userId).catch((err) => {
+            logger.error({ err, userId: session.userId }, "Failed to unregister online status");
           });
         }
         logger.info(
           {
-            userId: currentUserId,
-            sessionId: currentSessionId,
-            authenticated,
+            userId: session.userId,
+            sessionId: session.sessionId,
+            authenticated: session.authenticated,
           },
           "WebSocket connection closed"
         );
@@ -216,348 +202,8 @@ async function createApp() {
 
       // ---- 错误处理 ----
       socket.on("error", (err: Error) => {
-        logger.error({ err, userId: currentUserId }, "WebSocket error");
+        logger.error({ err, userId: session.userId }, "WebSocket error");
       });
-
-      // ===================================================================
-      // 消息处理函数 (闭包内, 可访问 socket / authenticated / currentUserId)
-      // ===================================================================
-
-      function handleAuth(msg: ClientAuthMessage, ws: WebSocket): void {
-        const { access_token, device_name, device_type } = msg.payload;
-
-        const result = verifyAccessToken(access_token);
-        if (!result.ok) {
-          const code =
-            result.error === "EXPIRED"
-              ? 1002
-              : result.error === "SESSION_INVALIDATED"
-                ? 1003
-                : 1004;
-          ws.send(
-            JSON.stringify(buildError(msg.seq, code, result.message))
-          );
-          return;
-        }
-
-        const payload = result.payload;
-
-        // Phase 2.1: 延迟创建 session (若 token 携带 session_id)
-        if (payload.session_id) {
-          const existing = sessionStore.getSync(payload.session_id);
-          if (!existing) {
-            // 延迟创建: 首次见到这个 session_id
-            sessionStore
-              .create({
-                sessionId: payload.session_id,
-                userId: payload.user_id,
-                deviceName: device_name,
-                deviceType: device_type,
-                createdAt: Date.now(),
-                expiresAt: (payload.exp ?? 0) * 1000,
-              })
-              .catch((err) =>
-                logger.error({ err }, "Failed to create session")
-              );
-          } else {
-            // 更新活跃时间
-            sessionStore
-              .updateActivity(payload.session_id)
-              .catch((err) =>
-                logger.error({ err }, "Failed to update session activity")
-              );
-          }
-        }
-
-        // 注册到连接管理器
-        const ok = connectionManager.register(
-          payload.user_id,
-          payload.username,
-          ws
-        );
-        if (!ok) {
-          ws.send(
-            JSON.stringify(
-              buildError(msg.seq, 5002, "Server busy, please try another gateway")
-            )
-          );
-          return;
-        }
-
-        authenticated = true;
-        currentUserId = payload.user_id;
-        currentUsername = payload.username;
-        currentSessionId = payload.session_id ?? null;
-
-        // token 到期前主动断开 WS, 逼前端走"静默续期 → 重连"
-        // (前端 REST 层已实现 401 自动 refresh; 否则长连接会带着过期身份一直挂着)
-        if (payload.exp) {
-          const ttlMs = payload.exp * 1000 - Date.now();
-          if (ttlMs > 0) {
-            const expTimer = setTimeout(() => {
-              logger.info(
-                { userId: currentUserId },
-                "WS closing: access token expired, forcing refresh-reconnect"
-              );
-              ws.close(4003, "Token expired");
-            }, ttlMs);
-            ws.on("close", () => clearTimeout(expTimer));
-          }
-        }
-
-        logger.info(
-          {
-            userId: currentUserId,
-            username: currentUsername,
-            sessionId: currentSessionId,
-            device_name,
-            device_type,
-            onlineCount: connectionManager.getOnlineCount(),
-          },
-          "User authenticated via WebSocket"
-        );
-
-        // Phase 2.3: 向 Redis 注册在线状态 → 全局路由表
-        onlineRegistry.onUserOnline(payload.user_id, payload.username).catch((err) => {
-          logger.error({ err, userId: payload.user_id }, "Failed to register online status");
-        });
-
-        ws.send(
-          JSON.stringify(
-            buildAuthOk(msg.seq, payload.user_id, payload.username)
-          )
-        );
-      }
-
-      function handlePing(msg: ClientPingMessage, ws: WebSocket): void {
-        if (authenticated) {
-          connectionManager.refreshHeartbeat(ws);
-        }
-        ws.send(JSON.stringify(buildPong(msg.seq)));
-      }
-
-      async function handleSendMessage(msg: ClientSendMessage): Promise<void> {
-        if (!currentUserId) return;
-
-        logger.info(
-          { from: currentUserId, to: msg.payload.peer_id },
-          "Forwarding message to message-service"
-        );
-
-        try {
-          const result = await messageClient.sendMessage({
-            from_peer: { type: 1, id: currentUserId },
-            to_peer: { type: msg.payload.peer_type, id: msg.payload.peer_id },
-            msg_type: msg.payload.msg_type ?? 0,
-            text: msg.payload.text,
-            reply_to_msg_id: msg.payload.reply_to_msg_id,
-            idempotency_key: msg.payload.idempotency_key,
-          });
-
-          // proto3 omits error_code=0 from JSON, so it may be undefined
-          if (result.error_code && result.error_code !== 0) {
-            socket.send(
-              JSON.stringify(
-                buildRpcResult(msg.seq, result.error_code, result.error_message || '', null)
-              )
-            );
-            return;
-          }
-
-          // 回确认给发送者 (消息已存储, message_id 已生成)
-          const confirmMsg = buildRpcResult(msg.seq, 0, "", {
-            message_id: result.message?.message_id,
-            status: "sent",
-          });
-          logger.info({ seq: msg.seq, msgId: result.message?.message_id }, "Sending rpc_result confirmation");
-          socket.send(JSON.stringify(confirmMsg));
-        } catch (err) {
-          logger.error({ err }, "Failed to send message via message-service");
-          socket.send(
-            JSON.stringify(
-              buildRpcResult(msg.seq, 5001, "Failed to send message", null)
-            )
-          );
-        }
-      }
-
-      function handleRoomSignal(msg: ClientRoomSignal): void {
-        if (!authenticated) return;
-        const { action, room_id, invite_user_ids, webrtc } = msg.payload;
-        const uid = String(currentUserId!);
-        const uname = currentUsername;
-
-        if (action === "create") {
-          const rid = roomManager.createRoom(uid, uname);
-          socket.send(JSON.stringify(buildRoomSignal({ action: "created", room_id: rid, participants: [{ userId: uid, username: uname }] })));
-          logger.info({ roomId: rid, userId: uid }, "Room created");
-        } else if (action === "join") {
-          const others = roomManager.joinRoom(room_id!, uid, uname);
-          if (!others) { socket.send(JSON.stringify(buildError(msg.seq, 1202, "Room not found"))); return; }
-          // 通知房间内其他人: 新成员加入
-          const room = roomManager.getRoom(room_id!);
-          for (const p of others) {
-            const ws = connectionManager.getByUserId(p.userId);
-            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "user_joined", room_id, from_user_id: uid, from_username: uname, participants: room?.participants })));
-          }
-          // 告知加入者完整列表
-          socket.send(JSON.stringify(buildRoomSignal({ action: "joined", room_id, participants: room?.participants || [] })));
-        } else if (action === "leave") {
-          const result = roomManager.leaveRoom(uid);
-          if (!result) return;
-          if (result.remaining.length === 0) return;
-          const room = roomManager.getRoom(result.roomId);
-          for (const p of result.remaining) {
-            const ws = connectionManager.getByUserId(p.userId);
-            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "user_left", room_id: result.roomId, from_user_id: uid, from_username: uname, participants: room?.participants })));
-          }
-        } else if (action === "invite") {
-          if (!invite_user_ids) return;
-          const room = roomManager.getUserRoom(uid);
-          if (!room) { socket.send(JSON.stringify(buildError(msg.seq, 1202, "You are not in a room"))); return; }
-          for (const targetId of invite_user_ids) {
-            const ws = connectionManager.getByUserId(String(targetId));
-            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "invited", room_id: room.roomId, from_user_id: uid, from_username: uname })));
-          }
-        } else if (action === "webrtc" && webrtc) {
-          // Mesh 模式: 转发 WebRTC 信令到房间内所有其他人
-          const room = roomManager.getUserRoom(uid);
-          if (!room) return;
-          for (const p of room.participants) {
-            if (p.userId === uid) continue;
-            const ws = connectionManager.getByUserId(p.userId);
-            if (ws) ws.send(JSON.stringify(buildRoomSignal({ action: "webrtc", from_user_id: uid, from_username: uname, webrtc: { ...webrtc, from_user_id: uid, from_username: uname } })));
-          }
-        }
-      }
-
-      function handleCallSignal(msg: ClientCallSignal): void {
-        if (!authenticated) return;
-        const { signal_type, to_user_id, data } = msg.payload;
-        const targetWs = connectionManager.getByUserId(String(to_user_id));
-        if (!targetWs) {
-          socket.send(JSON.stringify(buildError(msg.seq, 1101, "User not online")));
-          return;
-        }
-        // 转发信令给目标用户
-        const forward = buildCallSignal(signal_type, currentUserId!, currentUsername, data);
-        targetWs.send(JSON.stringify(forward));
-        logger.info({ signal_type, from: currentUserId, to: to_user_id }, "Call signal relayed");
-      }
-
-      function handleTyping(msg: ClientTypingMessage): void {
-        // Phase 2: 转发 typing 指示到 message-service
-        logger.debug(
-          { from: currentUserId, to: msg.payload.peer_id },
-          "Typing indicator (Phase 2)"
-        );
-      }
-
-      async function handleReadReceipt(msg: ClientReadReceiptMessage): Promise<void> {
-        // Phase 4: 转发已读回执到 message-service 的 AckMessage RPC
-        if (!currentUserId) return;
-
-        const max_ack_msg_id = msg.payload.max_read_msg_id;
-        // 校验用数值转换, 但转发原值 (string 防雪花 ID 精度丢失)
-        if (!max_ack_msg_id || !Number.isFinite(Number(max_ack_msg_id)) ||
-            Number(max_ack_msg_id) <= 0) {
-          return;   // 无效回执, 静默丢弃
-        }
-
-        logger.debug(
-          { user: currentUserId, max_read_msg_id: max_ack_msg_id },
-          "Forwarding read receipt to message-service"
-        );
-
-        try {
-          // 服务端消息模型以"接收方自己"为对话键 (to_peer_id = 接收者用户 ID),
-          // 所以 peer.id 用鉴权注入的 currentUserId, 不信任客户端传的 peer_id
-          const result = await messageClient.ackMessage({
-            user_id: currentUserId,
-            peer: { type: msg.payload.peer_type || 1, id: currentUserId },
-            max_ack_msg_id: max_ack_msg_id,
-            status: 3,   // MESSAGE_STATUS_READ
-          });
-
-          // proto3 omits error_code=0 from JSON, so it may be undefined
-          if (result.error_code && result.error_code !== 0) {
-            socket.send(
-              JSON.stringify(
-                buildRpcResult(msg.seq, result.error_code, result.error_message || '', null)
-              )
-            );
-            return;
-          }
-
-          socket.send(
-            JSON.stringify(buildRpcResult(msg.seq, 0, "", { max_ack_msg_id }))
-          );
-        } catch (err) {
-          logger.error({ err }, "Failed to forward read receipt to message-service");
-          socket.send(
-            JSON.stringify(
-              buildRpcResult(msg.seq, 5001, "Failed to ack message", null)
-            )
-          );
-        }
-      }
-
-      async function handleRpc(
-        msg: ClientRpcMessage,
-        ws: WebSocket
-      ): Promise<void> {
-        // 通用 RPC 代理: 客户端通过 WS 调用 C++ 服务
-        // 网关做鉴权注入后转发
-
-        logger.debug(
-          { service: msg.payload.service, method: msg.payload.method },
-          "WS RPC proxy"
-        );
-
-        try {
-          // 根据服务名路由到对应客户端
-          let result: unknown;
-
-          if (msg.payload.service === "nova.user.UserService") {
-            result = await proxyUserService(
-              msg.payload.method,
-              msg.payload.body,
-              currentUserId!
-            );
-          } else {
-            ws.send(
-              JSON.stringify(
-                buildRpcResult(
-                  msg.seq,
-                  5002,
-                  `Unknown service: ${msg.payload.service}`,
-                  null
-                )
-              )
-            );
-            return;
-          }
-
-          ws.send(
-            JSON.stringify(buildRpcResult(msg.seq, 0, "", result))
-          );
-        } catch (err) {
-          logger.error(
-            { err, service: msg.payload.service, method: msg.payload.method },
-            "RPC proxy failed"
-          );
-          ws.send(
-            JSON.stringify(
-              buildRpcResult(
-                msg.seq,
-                5001,
-                err instanceof Error ? err.message : "RPC call failed",
-                null
-              )
-            )
-          );
-        }
-      }
     }
   );
 
@@ -590,45 +236,6 @@ async function createApp() {
   });
 
   return app;
-}
-
-// =============================================================================
-// RPC 代理辅助
-// =============================================================================
-
-/**
- * 将 WebSocket RPC 调用转发给 C++ user-service
- */
-async function proxyUserService(
-  method: string,
-  body: Record<string, unknown>,
-  userId: string | number
-): Promise<unknown> {
-  // 注入 user_id (网关已验证身份)
-  const bodyWithUser = { ...body, user_id: userId };
-
-  switch (method) {
-    case "GetUserProfile":
-      return userClient.getUserProfile(bodyWithUser as any);
-    case "GetUsers":
-      return userClient.getUsers(bodyWithUser as any);
-    case "UpdateProfile":
-      return userClient.updateProfile(userId, body as any);
-    case "ChangeUsername":
-      return userClient.changeUsername(userId, (body as any).new_username);
-    case "CheckUsername":
-      return userClient.checkUsername((body as any).username);
-    case "SearchUsers":
-      return userClient.searchUsers(bodyWithUser as any);
-    case "ChangePassword":
-      return userClient.changePassword(
-        userId,
-        (body as any).old_password,
-        (body as any).new_password
-      );
-    default:
-      throw new Error(`Unknown UserService method: ${method}`);
-  }
 }
 
 // =============================================================================

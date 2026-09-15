@@ -2,10 +2,12 @@
  * JWT 鉴权工具
  *
  * Phase 2.1: RS256 非对称验证 + HS256 回退 + Session 失效检测
- * Phase 1:   HMAC-SHA256 对称签名 (保留 signToken 用于 dev/mock)
+ * Phase 1:   HMAC-SHA256 对称签名
  *
- * 核心原则: 网关只做验证 (verify)，不做签名 (sign)。
- * 生产环境 token 由 C++ user-service 的 RS256 私钥签发，网关持有公钥验证。
+ * 鉴权架构 (BFF 模式): JWT 的签发与验证统一收口在网关 —
+ * 前端只与网关交互, C++ 服务保持无状态 (只做凭证验证, 信任网关注入的 user_id)。
+ * keyStore 已支持 RS256 公钥验证 (kid 轮转), 将来可平滑切换为
+ * "签发方持私钥、网关持公钥"的密钥分离部署。
  */
 
 import jwt, { type SignOptions, type JwtHeader } from "jsonwebtoken";

@@ -37,7 +37,6 @@ export class ConnectionManager {
     const entry: ConnectionEntry = { ws, userId: uid, username, connectedAt: Date.now(), lastHeartbeat: Date.now() };
     this.byUserId.set(uid, entry);
     this.bySocket.set(ws, uid);
-    console.log(`[register] uid="${uid}" username="${username}" mapSize=${this.byUserId.size} allKeys=[${[...this.byUserId.keys()].join(',')}]`);
     logger.info({ userId: uid, username, onlineCount: this.byUserId.size }, "User connected");
     return true;
   }
@@ -72,7 +71,6 @@ export class ConnectionManager {
   sendToUser(userId: number | string, message: unknown): boolean {
     const key = String(userId);
     const entry = this.byUserId.get(key);
-    console.log(`[sendToUser] key="${key}" found=${!!entry} readyState=${entry?.ws?.readyState} mapSize=${this.byUserId.size} mapKeys=[${[...this.byUserId.keys()].join(',')}]`);
     if (!entry || entry.ws.readyState !== 1) return false;
     try { entry.ws.send(JSON.stringify(message)); return true; }
     catch (err) { logger.error({ userId, err }, "Failed to send"); return false; }

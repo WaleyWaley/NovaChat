@@ -86,25 +86,19 @@ services:
       - "--port=8001"
       - "--listen_addr=0.0.0.0"
       - "--worker_id=1"
-      # Phase 2.2: 启用 MySQL + Redis 持久化
+      # Phase 2.2: 启用 MySQL 持久化 (无 Redis: 会话由网关统一管理 — BFF 模式)
       - "--enable_mysql"
-      - "--enable_redis"
       - "--mysql_addr=mysql"
       - "--mysql_port=3306"
       - "--mysql_user=root"
       - "--mysql_passwd=novachat_dev"
       - "--mysql_db=novachat"
       - "--mysql_pool_size=8"
-      - "--redis_addr=redis"
-      - "--redis_port=6379"
-      - "--redis_passwd="
       - "--log_dir=/tmp"
       - "--minloglevel=0"
       - "--v=0"
     depends_on:
       mysql:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -141,17 +135,11 @@ services:
       - "--mysql_passwd=novachat_dev"
       - "--mysql_db=novachat"
       - "--mysql_pool_size=8"
-      - "--enable_redis"
-      - "--redis_addr=redis"
-      - "--redis_port=6379"
-      - "--redis_passwd="
       - "--log_dir=/tmp"
       - "--minloglevel=0"
       - "--v=0"
     depends_on:
       mysql:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     restart: unless-stopped
     networks:

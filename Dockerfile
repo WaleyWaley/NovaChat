@@ -110,7 +110,7 @@ class UserServiceBase : public ::google::protobuf::Service {
 public:
     virtual ~UserServiceBase();
 
-    // 12 RPCs — Phase 2 implementation delegates to UserServiceImpl
+    // 10 RPCs — Phase 2 implementation delegates to UserServiceImpl
     virtual void Register(::google::protobuf::RpcController*,
                           const ::nova::user::RegisterReq*,
                           ::nova::user::RegisterResp*,
@@ -119,14 +119,6 @@ public:
                        const ::nova::user::LoginReq*,
                        ::nova::user::LoginResp*,
                        ::google::protobuf::Closure*) {}
-    virtual void RefreshToken(::google::protobuf::RpcController*,
-                              const ::nova::user::RefreshTokenReq*,
-                              ::nova::user::RefreshTokenResp*,
-                              ::google::protobuf::Closure*) {}
-    virtual void Logout(::google::protobuf::RpcController*,
-                        const ::nova::user::LogoutReq*,
-                        ::nova::user::LogoutResp*,
-                        ::google::protobuf::Closure*) {}
     virtual void GetUserProfile(::google::protobuf::RpcController*,
                                 const ::nova::user::GetUserProfileReq*,
                                 ::nova::user::GetUserProfileResp*,
@@ -218,13 +210,10 @@ namespace {
         AddField(reg_req, "last_name",  4, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
         AddField(reg_req, "phone",      5, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
 
-        // ---- RegisterResp ----
+        // ---- RegisterResp (无 token 字段: 鉴权由网关统一签发 JWT) ----
         DescriptorProto* reg_resp = file_proto.add_message_type();
         reg_resp->set_name("RegisterResp");
         AddField(reg_resp, "user_id",       3, FieldDescriptorProto::TYPE_INT64,  FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(reg_resp, "access_token",  4, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(reg_resp, "refresh_token", 5, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(reg_resp, "expires_at",    6, FieldDescriptorProto::TYPE_INT64,  FieldDescriptorProto::LABEL_OPTIONAL);
         AddField(reg_resp, "error_code",    1, FieldDescriptorProto::TYPE_INT32,  FieldDescriptorProto::LABEL_OPTIONAL);
         AddField(reg_resp, "error_message", 2, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
 
@@ -236,14 +225,11 @@ namespace {
         AddField(login_req, "device_name", 3, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
         AddField(login_req, "device_type", 4, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
 
-        // ---- LoginResp ----
+        // ---- LoginResp (无 token 字段: 鉴权由网关统一签发 JWT) ----
         DescriptorProto* login_resp = file_proto.add_message_type();
         login_resp->set_name("LoginResp");
         AddField(login_resp, "error_code",    1, FieldDescriptorProto::TYPE_INT32,  FieldDescriptorProto::LABEL_OPTIONAL);
         AddField(login_resp, "error_message", 2, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(login_resp, "access_token",  3, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(login_resp, "refresh_token", 4, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(login_resp, "expires_at",    5, FieldDescriptorProto::TYPE_INT64,  FieldDescriptorProto::LABEL_OPTIONAL);
 
         // ---- GetUserProfileReq (has oneof identifier) ----
         DescriptorProto* gup_req = file_proto.add_message_type();
@@ -274,23 +260,6 @@ namespace {
 
         // ---- GetUsersResp ----
         file_proto.add_message_type()->set_name("GetUsersResp");
-
-        // ---- RefreshTokenReq ----
-        DescriptorProto* rt_req = file_proto.add_message_type();
-        rt_req->set_name("RefreshTokenReq");
-        AddField(rt_req, "refresh_token", 1, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-
-        // ---- RefreshTokenResp ----
-        DescriptorProto* rt_resp = file_proto.add_message_type();
-        rt_resp->set_name("RefreshTokenResp");
-        AddField(rt_resp, "access_token",  3, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(rt_resp, "refresh_token", 4, FieldDescriptorProto::TYPE_STRING, FieldDescriptorProto::LABEL_OPTIONAL);
-        AddField(rt_resp, "expires_at",    5, FieldDescriptorProto::TYPE_INT64,  FieldDescriptorProto::LABEL_OPTIONAL);
-
-        // ---- LogoutReq ----
-        DescriptorProto* lo_req = file_proto.add_message_type();
-        lo_req->set_name("LogoutReq");
-        AddField(lo_req, "user_id", 1, FieldDescriptorProto::TYPE_INT64, FieldDescriptorProto::LABEL_OPTIONAL);
 
         // ---- CheckUsernameReq ----
         DescriptorProto* cu_req = file_proto.add_message_type();
@@ -359,7 +328,6 @@ namespace {
 
         // ---- Remaining stubs ----
         const char* remaining[] = {
-            "LogoutResp",
             "UpdateProfileResp","ChangeUsernameResp","ChangePasswordResp",
             "DeleteAccountResp"
         };
@@ -367,12 +335,12 @@ namespace {
             file_proto.add_message_type()->set_name(m);
         }
 
-        // Define the service with all 12 RPCs
+        // Define the service with all 10 RPCs
         ServiceDescriptorProto* svc = file_proto.add_service();
         svc->set_name("UserService");
 
         const char* methods[] = {
-            "Register","Login","RefreshToken","Logout",
+            "Register","Login",
             "GetUserProfile","GetUsers","UpdateProfile","ChangeUsername",
             "CheckUsername","ChangePassword","SearchUsers","DeleteAccount"
         };
@@ -416,14 +384,6 @@ void UserServiceBase::CallMethod(
         Login(controller,
               static_cast<const ::nova::user::LoginReq*>(request),
               static_cast<::nova::user::LoginResp*>(response), done);
-    } else if (name == "RefreshToken") {
-        RefreshToken(controller,
-                     static_cast<const ::nova::user::RefreshTokenReq*>(request),
-                     static_cast<::nova::user::RefreshTokenResp*>(response), done);
-    } else if (name == "Logout") {
-        Logout(controller,
-               static_cast<const ::nova::user::LogoutReq*>(request),
-               static_cast<::nova::user::LogoutResp*>(response), done);
     } else if (name == "GetUserProfile") {
         GetUserProfile(controller,
                        static_cast<const ::nova::user::GetUserProfileReq*>(request),
@@ -467,8 +427,6 @@ const ::google::protobuf::Message& UserServiceBase::GetRequestPrototype(
     if (n == "Login")           return ::nova::user::LoginReq::default_instance();
     if (n == "GetUserProfile")  return ::nova::user::GetUserProfileReq::default_instance();
     if (n == "GetUsers")        return ::nova::user::GetUsersReq::default_instance();
-    if (n == "RefreshToken")    return ::nova::user::RefreshTokenReq::default_instance();
-    if (n == "Logout")          return ::nova::user::LogoutReq::default_instance();
     if (n == "CheckUsername")   return ::nova::user::CheckUsernameReq::default_instance();
     if (n == "SearchUsers")     return ::nova::user::SearchUsersReq::default_instance();
     if (n == "UpdateProfile")   return ::nova::user::UpdateProfileReq::default_instance();
@@ -485,8 +443,6 @@ const ::google::protobuf::Message& UserServiceBase::GetResponsePrototype(
     if (n == "Login")           return ::nova::user::LoginResp::default_instance();
     if (n == "GetUserProfile")  return ::nova::user::GetUserProfileResp::default_instance();
     if (n == "GetUsers")        return ::nova::user::GetUsersResp::default_instance();
-    if (n == "RefreshToken")    return ::nova::user::RefreshTokenResp::default_instance();
-    if (n == "Logout")          return ::nova::user::LogoutResp::default_instance();
     if (n == "CheckUsername")   return ::nova::user::CheckUsernameResp::default_instance();
     if (n == "SearchUsers")     return ::nova::user::SearchUsersResp::default_instance();
     if (n == "UpdateProfile")   return ::nova::user::UpdateProfileResp::default_instance();

@@ -239,7 +239,7 @@ class GatewayRedis {
   }
 
   /** 查询用户在线状态 (任意网关) */
-  async isUserOnline(userId: number): Promise<OnlineEntry | null> {
+  async isUserOnline(userId: string | number): Promise<OnlineEntry | null> {
     if (!this.client || !this._connected) return null;
 
     const key = `user:online:${userId}`;

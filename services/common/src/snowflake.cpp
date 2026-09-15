@@ -27,67 +27,50 @@ static constexpr int kWorkerIdShift  = kSequenceBits;                  // 12
 
 Snowflake::Snowflake(int64_t worker_id)
     : worker_id_(worker_id)
-    , worker_id_shift_(worker_id << kWorkerIdShift) {
+    , worker_id_shift_(0) {
 
+    // 先校验再计算位移 (负数位移是未定义行为)
     if (worker_id < 0 || worker_id > kMaxWorkerId) {
         NOVA_LOG_FATAL << "Snowflake worker_id out of range: "
                        << worker_id << " (0–" << kMaxWorkerId << ")";
     }
+    worker_id_shift_ = worker_id << kWorkerIdShift;
 
     NOVA_LOG_INFO << "Snowflake initialized: worker_id=" << worker_id_
                   << ", epoch=" << kSnowflakeEpoch;
 }
 
 int64_t Snowflake::NextId() {
-    // 获取当前时间戳 (毫秒)
+    // 全程持锁: 时间戳与序列号是一个整体状态, 锁外读写会造成数据竞争
+    // (旧实现曾因锁外 fetch_add + 锁外读 last_timestamp_ 把线程抢占误判为
+    //  "时钟回拨" 而随机 FATAL 杀进程)
+    std::lock_guard<std::mutex> lock(mu_);
+
+    // 逻辑时钟: 以 last_timestamp_ 为准, 只前进不后退。
+    // 物理时钟回拨时沿用逻辑时钟继续派号 (Leaf/UidGenerator 同思路),
+    // 绝不因回拨杀进程 — 只有序列空间耗尽时才需要等物理时钟追上。
     int64_t ts = CurrentMs();
 
-    // 序列号自增 (同一毫秒内)
-    int64_t seq = sequence_.fetch_add(1, std::memory_order_relaxed);
-
-    {
-        // 线程安全: 保护 last_timestamp_ 的读写
-        std::lock_guard<std::mutex> lock(mu_);
-
-        if (ts > last_timestamp_) {
-            // 进入新毫秒, 重置序列号
-            last_timestamp_ = ts;
-            sequence_.store(0, std::memory_order_relaxed);
-            seq = 0;
-        } else if (ts < last_timestamp_) {
-            // 时钟回拨
+    if (ts <= last_timestamp_) {
+        if (sequence_ < kMaxSequence) {
+            // 同一逻辑毫秒内还有序列空间: 继续派号 (回拨时也在逻辑时间上推进)
+            ts = last_timestamp_;
+        } else {
+            // 序列耗尽 (回拨期间或单毫秒 >4096 请求): 必须等物理时钟越过逻辑时钟
             int64_t back = last_timestamp_ - ts;
-
-            if (back <= 5) {
-                // 轻微回拨 (≤ 5ms)自旋等待: spin 等待时钟追上
-                NOVA_LOG_WARN << "Clock rollback detected: " << back
-                              << "ms, waiting...";
-                ts = WaitNextMs(last_timestamp_);
-                last_timestamp_ = ts;
-                sequence_.store(0, std::memory_order_relaxed);
-                seq = 0;
-            } else {
-                // 严重回拨 (> 5ms): 不可恢复, FATAL 退出
-                NOVA_LOG_FATAL << "Severe clock rollback: " << back
-                               << "ms. Worker cannot continue safely.";
-                // LOG(FATAL) 会 abort, 此行不可达
-            }
+            NOVA_LOG_WARN << "Snowflake: sequence exhausted (physical clock "
+                          << back << "ms behind logical clock), waiting...";
+            ts = WaitNextMs(last_timestamp_);
         }
-        // ts == last_timestamp_: 同一毫秒, seq 已自增, 继续
     }
 
-    // 序列号溢出保护: 同一毫秒内超过 4096 个请求
-    // 实际场景几乎不可能 (单机 4M QPS), 但做防御
-    while (seq > kMaxSequence) {
-        ts = WaitNextMs(last_timestamp_);
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_timestamp_ = ts;
-            sequence_.store(0, std::memory_order_relaxed);
-        }
-        // 重试: 在新毫秒获取序列号
-        return NextId();  // 递归, 最多一层
+    if (ts > last_timestamp_) {
+        // 进入新毫秒, 重置序列号
+        last_timestamp_ = ts;
+        sequence_ = 0;
     }
+
+    int64_t seq = sequence_++;   // 同一毫秒内自增 (0..4095)
 
     // 组装 ID
     int64_t timestamp_part = (ts - kSnowflakeEpoch) << kTimestampShift;

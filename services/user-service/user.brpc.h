@@ -31,18 +31,6 @@ public:
         ::nova::user::LoginResp* response,
         ::google::protobuf::Closure* done) = 0;
 
-    virtual void RefreshToken(
-        ::google::protobuf::RpcController* controller,
-        const ::nova::user::RefreshTokenReq* request,
-        ::nova::user::RefreshTokenResp* response,
-        ::google::protobuf::Closure* done) = 0;
-
-    virtual void Logout(
-        ::google::protobuf::RpcController* controller,
-        const ::nova::user::LogoutReq* request,
-        ::nova::user::LogoutResp* response,
-        ::google::protobuf::Closure* done) = 0;
-
     // Profile query
     virtual void GetUserProfile(
         ::google::protobuf::RpcController* controller,

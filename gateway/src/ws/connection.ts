@@ -1,5 +1,6 @@
 /**
- * WebSocket 连接管理器
+ * 本网关内部的 WebSocket 连接管理器
+ * 跨网关在线状态是有 online_registry.ts + Redis 处理的。
  * 注意: user_id 统一使用 string 类型 (Snowflake 64-bit 超出 JS Number 安全精度)
  */
 
@@ -9,34 +10,47 @@ import { logger } from "../utils/logger.js";
 
 interface ConnectionEntry {
   ws: WebSocket;
-  userId: string;
+  userId: string;   // 统一转string
   username: string;
   connectedAt: number;
-  lastHeartbeat: number;
+  lastHeartbeat: number;    
 }
 
+// 单例模式 _id 是实例编号，这里其实永远只会创建一个实例。
+// 导出全局单例 connectionManager，整个网关共用。
 let _instanceId = 0;
 export class ConnectionManager {
   public readonly _id = ++_instanceId;
+  // 通过userId找连接。推送消息时根据目标用户 ID 快速找到 socket。
   private readonly byUserId = new Map<string, ConnectionEntry>();
+  // 通过 socket 找 userId。连接关闭或收到心跳时，根据 socket 反查用户。
   private readonly bySocket = new Map<WebSocket, string>();
+    
   private readonly processedPushIds = new Set<string>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
   register(userId: number | string, username: string, ws: WebSocket): boolean {
     const uid = String(userId);
+
+    // 1.检查最大连接数
     if (this.byUserId.size >= config.WS_MAX_CONNECTIONS) {
       logger.warn({ count: this.byUserId.size }, "Max connections reached");
       return false;
     }
+
+    // 2.同一用户已有连接则踢掉旧连接
     const existing = this.byUserId.get(uid);
     if (existing) {
       logger.info({ userId: uid }, "Replacing existing connection");
       this.kickExisting(existing);
     }
+
+    // 3.创建新连接记录
     const entry: ConnectionEntry = { ws, userId: uid, username, connectedAt: Date.now(), lastHeartbeat: Date.now() };
+    
     this.byUserId.set(uid, entry);
     this.bySocket.set(ws, uid);
+    
     logger.info({ userId: uid, username, onlineCount: this.byUserId.size }, "User connected");
     return true;
   }
@@ -45,15 +59,19 @@ export class ConnectionManager {
     const userId = this.bySocket.get(ws);
     if (userId === undefined) return null;
     const entry = this.byUserId.get(userId);
+    // 安全检查：防止误删别人的连接
     if (entry && entry.ws !== ws) { this.bySocket.delete(ws); return null; }
+    
     this.byUserId.delete(userId);
     this.bySocket.delete(ws);
     logger.info({ userId, onlineCount: this.byUserId.size }, "User disconnected");
     return userId;
   }
 
+    // 查询方法
   getByUserId(userId: number | string): WebSocket | null {
     const entry = this.byUserId.get(String(userId));
+    // readyState === 1 表示WS处理OPEN状态
     return entry && entry.ws.readyState === 1 ? entry.ws : null;
   }
 

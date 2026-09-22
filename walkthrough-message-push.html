@@ -1,0 +1,505 @@
+<html lang="zh-CN" style="color-scheme: dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaChat 消息推送 A→B 全链路</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: { colors: {
+      wt: {
+        bg: '#000000', surface: '#0a0a0a', raised: '#141414',
+        border: '#2a2a2a', fg: '#ffffff', muted: '#a0a0a0',
+        accent: '#a855f7', file: '#c084fc', red: '#ef4444',
+      },
+      node: {
+        component: '#a855f7', composable: '#7c3aed', utility: '#6d28d9',
+        external: '#525252', event: '#d8b4fe', data: '#9333ea',
+      },
+    }}},
+  };
+</script>
+<style>
+  html, body { background: #000; }
+  .mermaid-wrap svg { max-width: none !important; height: auto !important; }
+  .mermaid-wrap .node { cursor: pointer; }
+  .mermaid-wrap .node:hover rect,
+  .mermaid-wrap .node:hover polygon,
+  .mermaid-wrap .node:hover circle,
+  .mermaid-wrap .node:hover .label-container { filter: brightness(1.3); transition: filter .15s; }
+  .dt-body p { color:#a0a0a0; font-size:.88rem; line-height:1.65; margin-bottom:10px; }
+  .dt-body p code {
+    background:rgba(168,85,247,.12); padding:1px 6px; border-radius:4px;
+    font-family:'SF Mono','Fira Code',monospace; font-size:.82rem; color:#c084fc;
+  }
+  .dt-body .shiki, .dt-body pre.code-fallback {
+    background: #000000; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 8px 0 14px;
+  }
+  .dt-body .shiki { background: #000000 !important; }
+  .dt-body .shiki code, .dt-body pre.code-fallback code {
+    font-family: 'SF Mono','Fira Code',monospace; font-size: .78rem; line-height: 1.55;
+    background: none; padding: 0; border-radius: 0;
+  }
+  .dt-body .shiki code { color: inherit; }
+  .dt-body pre.code-fallback code { color: #e0e0e0; }
+</style>
+</head>
+<body class="bg-wt-bg">
+<div id="root"></div>
+
+<script type="module">
+import { createHighlighter } from 'https://cdn.jsdelivr.net/npm/shiki@3.22.0/+esm'
+const { useState, useEffect, useRef, useCallback } = React;
+const h = React.createElement;
+
+// ============================ 数据 ============================
+
+const SUMMARY = "A 在浏览器点发送 → 前端乐观上屏并带幂等键走 WS → 网关转 bRPC 给 C++ 消息服务 → 雪花 ID 生成后参数化落库（1062 判重）→ C++ 反向 HTTP 调用网关 PushService → 投递管线本地直投、跨网关经 Redis 路由表转发（一跳防环）→ B 收到 update 渲染；A 同时收到 rpc_result 把 temp_ 消息替换为真实 message_id。";
+
+const DIAGRAM = `
+graph LR
+  subgraph client_a["发送端 (A 的浏览器)"]
+    sendInput["Send Input"]:::component
+    optimisticSend["Optimistic Send"]:::composable
+    senderAck["Send Confirmation"]:::composable
+  end
+  subgraph gateway["网关 (Fastify :3000)"]
+    wsDispatch["WS Dispatch"]:::utility
+    pushRoute["Push Service Entry"]:::utility
+    delivery["Delivery Pipeline"]:::utility
+    connectionTable["Connection Table"]:::data
+  end
+  subgraph cpp["C++ 服务"]
+    messageService["Message Service"]:::external
+    sqlPersist["SQL Persist + Dedup"]:::external
+    pushTrigger["Push Dispatcher"]:::external
+  end
+  subgraph client_b["接收端 (B 的浏览器)"]
+    updateReceived["Update Received"]:::composable
+  end
+
+  sendInput -->|"triggers"| optimisticSend
+  optimisticSend -->|"WS send_msg (seq + idempotency key)"| wsDispatch
+  wsDispatch -->|"bRPC http+json"| messageService
+  messageService -->|"Snowflake ID + params"| sqlPersist
+  sqlPersist -->|"stored → trigger"| pushTrigger
+  pushTrigger -->|"reverse HTTP POST PushUpdate"| pushRoute
+  pushRoute -->|"normalize + dedup"| delivery
+  delivery -->|"local online → send"| connectionTable
+  delivery -->|"not local → Redis lookup → forward (no_forward)"| pushRoute
+  connectionTable -->|"push update (NEW_MESSAGE)"| updateReceived
+  messageService -.->|"responds message_id"| wsDispatch
+  wsDispatch -.->|"rpc_result confirm"| senderAck
+
+  classDef component fill:#a855f7,stroke:#c084fc,color:#fff
+  classDef composable fill:#7c3aed,stroke:#a78bfa,color:#fff
+  classDef utility fill:#6d28d9,stroke:#8b5cf6,color:#fff
+  classDef external fill:#525252,stroke:#737373,color:#fff
+  classDef data fill:#9333ea,stroke:#a855f7,color:#fff
+
+  click sendInput nodeClickHandler "View details"
+  click optimisticSend nodeClickHandler "View details"
+  click senderAck nodeClickHandler "View details"
+  click wsDispatch nodeClickHandler "View details"
+  click pushRoute nodeClickHandler "View details"
+  click delivery nodeClickHandler "View details"
+  click connectionTable nodeClickHandler "View details"
+  click messageService nodeClickHandler "View details"
+  click sqlPersist nodeClickHandler "View details"
+  click pushTrigger nodeClickHandler "View details"
+  click updateReceived nodeClickHandler "View details"
+`;
+
+const NODES = {
+  sendInput: {
+    title: "Send Input — 发送入口",
+    description: "A 在输入框点 Send 或按 Enter（非 Shift+Enter）后，清空输入框并调用 store 的 sendMessage(peerId, text)。这是整条链路的用户侧起点。",
+    files: ["web/src/components/chat/ChatInputBar.tsx:22-27"],
+    code: `const send = () => {
+  const t = text.trim();
+  if (!t) return;
+  sendMessage(peerId, t);
+  setText('');
+};`,
+    lang: "typescript",
+  },
+  optimisticSend: {
+    title: "Optimistic Send — 乐观消息 + 出网",
+    description: "store 先经 wsManager.sendMessage 拿到自增 seq（并生成幂等键），再以 temp_<seq> 为临时 message_id 把消息以 'sending' 状态同步上屏——乐观 UI 的标准做法：先渲染，等回执再确认。",
+    files: ["web/src/store/useAppStore.ts:178-192", "web/src/api/ws.ts:141-149"],
+    code: `const seq = this._nextSeq();
+const payload: SendMsgPayload = {
+  peer_type: 1, // USER
+  peer_id: peerId,
+  msg_type: 0, // TEXT
+  text,
+  idempotency_key: this._newIdempotencyKey(),
+};
+this._send({ type: 'send_msg', seq, payload });`,
+    lang: "typescript",
+  },
+  wsDispatch: {
+    title: "WS Dispatch — 网关消息分发",
+    description: "网关 /ws 连接按 type 分发到 handler；handleSendMessage 用鉴权注入的 userId 作为 from_peer（不信任客户端身份），把消息以 bRPC http+json 转发给 C++ 消息服务。",
+    files: ["gateway/src/main.ts:130-160", "gateway/src/ws/handlers/messaging.ts"],
+    code: `const result = await messageClient.sendMessage({
+  from_peer: { type: 1, id: session.userId },
+  to_peer: { type: msg.payload.peer_type, id: msg.payload.peer_id },
+  msg_type: msg.payload.msg_type ?? 0,
+  text: msg.payload.text,
+  idempotency_key: msg.payload.idempotency_key,
+});`,
+    lang: "typescript",
+  },
+  messageService: {
+    title: "Message Service — C++ 校验与落库调度",
+    description: "SendMessage RPC：先做输入校验（peer/文本），用 Snowflake 生成全局唯一 message_id，再交给 DAO 落库；落库返回空时用 IsDuplicate 区分\"幂等重复\"（OK）与\"真实失败\"（INTERNAL_ERROR）。",
+    files: ["services/message-service/message_service_impl.cc:58-100"],
+    code: `auto stored = dao_->SaveMessage(record, idempotency_key);
+if (!stored) {
+    if (!idempotency_key.empty() && dao_->IsDuplicate(idempotency_key)) {
+        response->set_error_code(::nova::common::OK);
+        response->set_is_new(false);
+        // ... 重复消息: 直接返回已有语义
+    }
+    response->set_error_code(::nova::common::INTERNAL_ERROR);
+    return;
+}`,
+    lang: "cpp",
+  },
+  sqlPersist: {
+    title: "SQL Persist + Dedup — 参数化落库与 1062 判重",
+    description: "DAO 用 Prepared Statement（? 占位 + mysql_stmt 绑定）把消息写入 MySQL，idempotency_key 唯一索引兜底：错误码 -1062 精确判定重复提交，绝不吞其他错误。",
+    files: ["services/message-service/message_dao.cc:82-145", "services/common/src/mysql_pool.cpp"],
+    code: `butil::Status st = mysql_->ExecutePrepared(sql, params);
+if (!st.ok()) {
+    if (st.error_code() == -1062) {
+        // 幂等键唯一冲突 = 同一消息的重复提交
+        NOVA_LOG_INFO << "MessageDao: Duplicate message blocked (key="
+                      << idempotency_key << ")";
+        return std::nullopt;
+    }
+    return std::nullopt;
+}`,
+    lang: "cpp",
+  },
+  pushTrigger: {
+    title: "Push Dispatcher — C++ 反向推送起点",
+    description: "落库成功后，非静默且接收者为用户时构造 Update（UPDATE_NEW_MESSAGE + from_peer/to_peer/newMessage），把请求序列化为 JSON 后经 brpc HTTP Channel POST 回网关的 PushService——微服务反向调用网关的入口。",
+    files: ["services/message-service/message_service_impl.cc:117-129", "services/message-service/push_dispatcher.cc:70-105"],
+    code: `::nova::common::Update update;
+update.set_type(::nova::common::UPDATE_NEW_MESSAGE);
+auto* new_msg = update.mutable_new_message();
+new_msg->set_message_id(stored->message_id);
+new_msg->mutable_from_peer()->CopyFrom(request->from_peer());
+new_msg->mutable_to_peer()->CopyFrom(request->to_peer());
+// ...
+push_->PushToUser(request->to_peer().id(), update);`,
+    lang: "cpp",
+  },
+  pushRoute: {
+    title: "Push Service Entry — 反向推送的 HTTP 入口",
+    description: "网关上的 /nova.gateway.PushService/PushUpdate 路由：请求体字段名归一化（bRPC json2pb 输出 camelCase），push_id 幂等去重（C++ 重试不重复推送），然后交给统一投递管线。",
+    files: ["gateway/src/routes/push.ts"],
+    code: `const body = normalizeBody(request.body as Record<string, unknown>);
+// 幂等去重: C++ 侧 bRPC 重试 + 雪花 push_id
+if (push_id && connectionManager.isDuplicatePush(push_id)) {
+  logger.debug({ push_id }, "Duplicate push skipped");
+  return { error_code: 0, error_message: "", delivered: true, push_id };
+}
+const { type, data } = splitUpdate(update);
+const result = await deliverUpdateToUser(target_user_id, type, data, {
+  skipOffline: skip_offline, noForward: no_forward, pushId: push_id,
+});`,
+    lang: "typescript",
+  },
+  delivery: {
+    title: "Delivery Pipeline — 统一投递管线",
+    description: "核心投递逻辑：本地在线 → 连接表直投（失败 1.5s 重试一次）；本地不在线 → 查 Redis 在线路由表 user:online:* 定位 B 所在的网关，HTTP 转发过去并带 no_forward 标记（一跳防环，目标网关只投本地不再转发）。",
+    files: ["gateway/src/ws/push_delivery.ts"],
+    code: `if (connectionManager.isOnline(uid)) {
+  const delivered = connectionManager.sendToUser(uid, serverMsg);
+  // 失败 1.5s 后重试一次 (用户可能正在重连)
+  if (!delivered) { /* setTimeout retry */ }
+  return { delivered };
+}
+if (opts.noForward) return { delivered: false };   // 防环
+const entry = await gatewayRedis.isUserOnline(uid);
+if (entry && entry.gateway_addr !== config.GATEWAY_ADDR) {
+  // fetch 转发到目标网关, 带 no_forward: true + 原 push_id
+}`,
+    lang: "typescript",
+  },
+  connectionTable: {
+    title: "Connection Table — 网关本地连接表",
+    description: "ConnectionManager 维护 userId ↔ WebSocket 的双向索引（byUserId/bySocket）。sendToUser 查表直接向 B 的 socket 写帧；心跳超时（60s 无 ping）会断开并清理。",
+    files: ["gateway/src/ws/connection.ts"],
+    code: `sendToUser(userId: number | string, message: unknown): boolean {
+  const key = String(userId);
+  const entry = this.byUserId.get(key);
+  if (!entry || entry.ws.readyState !== 1) return false;
+  try { entry.ws.send(JSON.stringify(message)); return true; }
+  catch (err) { logger.error({ userId, err }, "Failed to send"); return false; }
+}`,
+    lang: "typescript",
+  },
+  updateReceived: {
+    title: "Update Received — B 端接收与渲染",
+    description: "B 的 ws.onmessage 解析出 type==='update' 的推送 → wsBridge 只放行新消息且非自己发的 → store.addIncomingMessage 按 message_id 去重后\"只增不改\"追加进 chats[peerId].messages，当前会话立即回已读。",
+    files: ["web/src/api/ws.ts:245-251", "web/src/managers/wsBridge.ts:24-41", "web/src/store/useAppStore.ts:222-248"],
+    code: `const msgId = String(inner.messageId ?? inner.message_id ?? Date.now());
+store.addIncomingMessage(fromId, {
+  message_id: msgId,
+  text: inner.text,
+  created_at: Date.now(),
+});
+// addIncomingMessage 内部:
+//   去重: chat.messages.some(m => String(m.message_id) === msg.message_id) → return
+//   追加: chats2[peerId] = { ...chat, messages: [...chat.messages, incoming], unread }`,
+    lang: "typescript",
+  },
+  senderAck: {
+    title: "Send Confirmation — 发送确认闭环",
+    description: "A 等的是自己发出去的 seq 对应的 rpc_result：wsBridge 把 (seq, message_id) 交给 store.confirmMessage，把 temp_<seq> 乐观消息就地替换为真实 message_id，状态从 sending 变 sent（✓）。",
+    files: ["web/src/api/ws.ts:252-259", "web/src/managers/wsBridge.ts:17-20", "web/src/store/useAppStore.ts:206-215"],
+    code: `confirmMessage: (seq, realId) => {
+  const tempId = 'temp_' + seq;
+  const newId = String(realId || 'sent_' + seq);
+  const { chats } = get();
+  for (const [pid, chat] of Object.entries(chats)) {
+    const idx = chat.messages.findIndex((m) => String(m.message_id) === tempId);
+    if (idx >= 0) {
+      // messages[idx] = { ...messages[idx], message_id: newId, status: 'sent' }
+    }
+  }
+}`,
+    lang: "typescript",
+  },
+};
+
+const LEGEND = [
+  { label: 'UI / 组件', color: 'bg-node-component' },
+  { label: 'Store / 逻辑', color: 'bg-node-composable' },
+  { label: '网关模块', color: 'bg-node-utility' },
+  { label: 'C++ 服务', color: 'bg-node-external' },
+  { label: '状态表', color: 'bg-node-data' },
+];
+
+// ============================ Shiki ============================
+
+const langs = [...new Set(Object.values(NODES).map(n => n.lang).filter(Boolean))];
+let highlighter = null;
+try { highlighter = await createHighlighter({ themes: ['vitesse-dark'], langs }); }
+catch (e) { console.warn('Shiki failed:', e); }
+const HIGHLIGHTED = {};
+for (const [id, node] of Object.entries(NODES)) {
+  if (node.code && highlighter) {
+    try {
+      HIGHLIGHTED[id] = highlighter.codeToHtml(node.code, { lang: node.lang || 'typescript', theme: 'vitesse-dark' });
+    } catch (e) { console.warn('Highlight failed for ' + id + ':', e); }
+  }
+}
+
+// ============================ 组件 ============================
+
+function usePanZoom() {
+  const viewportRef = useRef(null), canvasRef = useRef(null), zoomDisplayRef = useRef(null);
+  const st = useRef({ zoom: 1, panX: 0, panY: 0 });
+  const drag = useRef({ on: false, lx: 0, ly: 0 });
+
+  const apply = useCallback(() => {
+    const { zoom, panX, panY } = st.current;
+    if (canvasRef.current)
+      canvasRef.current.style.transform = `translate(${panX}px,${panY}px) scale(${zoom})`;
+    if (zoomDisplayRef.current)
+      zoomDisplayRef.current.textContent = Math.round(zoom * 100) + '%';
+  }, []);
+
+  const fitToScreen = useCallback(() => {
+    const svg = canvasRef.current?.querySelector('svg');
+    const vp = viewportRef.current;
+    if (!svg || !vp) return;
+    const s = st.current;
+    const vw = vp.clientWidth, vh = vp.clientHeight;
+    const sw = svg.getBoundingClientRect().width / s.zoom;
+    const sh = svg.getBoundingClientRect().height / s.zoom;
+    const fit = Math.max(0.15, Math.min(2, Math.min((vw - 80) / sw, (vh - 80) / sh)));
+    s.zoom = fit; s.panX = (vw - sw * fit) / 2; s.panY = (vh - sh * fit) / 2;
+    apply();
+  }, [apply]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top, s = st.current;
+      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const nz = Math.min(4, Math.max(0.15, s.zoom * f)), sc = nz / s.zoom;
+      s.panX = mx - sc * (mx - s.panX); s.panY = my - sc * (my - s.panY); s.zoom = nz;
+      apply();
+    };
+    const onDown = (e) => {
+      if (e.target.closest('.node')) return;
+      drag.current = { on: true, lx: e.clientX, ly: e.clientY };
+      vp.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e) => {
+      const d = drag.current; if (!d.on) return;
+      st.current.panX += e.clientX - d.lx; st.current.panY += e.clientY - d.ly;
+      d.lx = e.clientX; d.ly = e.clientY; apply();
+    };
+    const onUp = () => { drag.current.on = false; };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    vp.addEventListener('pointerdown', onDown);
+    vp.addEventListener('pointermove', onMove);
+    vp.addEventListener('pointerup', onUp);
+    vp.addEventListener('pointercancel', onUp);
+    window.addEventListener('resize', fitToScreen);
+    return () => {
+      vp.removeEventListener('wheel', onWheel);
+      vp.removeEventListener('pointerdown', onDown);
+      vp.removeEventListener('pointermove', onMove);
+      vp.removeEventListener('pointerup', onUp);
+      vp.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('resize', fitToScreen);
+    };
+  }, [apply, fitToScreen]);
+
+  const zoomIn = useCallback(() => { st.current.zoom = Math.min(4, st.current.zoom * 1.25); apply(); }, [apply]);
+  const zoomOut = useCallback(() => { st.current.zoom = Math.max(0.15, st.current.zoom / 1.25); apply(); }, [apply]);
+  return { viewportRef, canvasRef, zoomDisplayRef, zoomIn, zoomOut, fitToScreen };
+}
+
+function MermaidDiagram({ onNodeClick }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    window.nodeClickHandler = onNodeClick;
+    mermaid.initialize({
+      startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+      themeVariables: {
+        primaryColor: '#0a0a0a', primaryTextColor: '#ffffff', primaryBorderColor: '#2a2a2a',
+        lineColor: '#a0a0a0', background: '#000000',
+        secondaryColor: '#000000', tertiaryColor: '#000000',
+        mainBkg: '#0a0a0a', nodeBorder: '#2a2a2a',
+        clusterBkg: 'rgba(10,10,10,0.8)', clusterBorder: '#7c3aed',
+        titleColor: '#ffffff', edgeLabelBackground: 'transparent',
+      },
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+    });
+    mermaid.render('walkthrough-diagram', DIAGRAM).then(({ svg, bindFunctions }) => {
+      if (ref.current) { ref.current.innerHTML = svg; bindFunctions?.(ref.current); }
+    });
+    return () => { delete window.nodeClickHandler; };
+  }, [onNodeClick]);
+  return h('div', { ref, className: 'mermaid-wrap' });
+}
+
+function Summary({ collapsed, onToggle }) {
+  if (collapsed) {
+    return h('div', {
+      onClick: onToggle,
+      className: 'fixed top-16 left-6 z-10 px-3 py-1.5 bg-wt-surface/60 backdrop-blur border border-wt-border rounded-full shadow-lg cursor-pointer hover:bg-wt-surface/80 transition-all duration-300'
+    }, h('span', { className: 'text-xs text-wt-muted font-medium' }, 'ℹ︎ Summary'));
+  }
+  return h('div', {
+    onClick: onToggle,
+    className: 'fixed top-16 left-6 z-10 max-w-lg px-4 py-3 bg-wt-surface/80 backdrop-blur border border-wt-border rounded-lg shadow-lg cursor-pointer transition-all duration-300'
+  },
+    h('p', { className: 'text-sm text-wt-muted leading-relaxed' }, SUMMARY),
+    h('p', { className: 'text-[0.65rem] text-wt-muted/50 mt-1.5' }, 'Click to dismiss')
+  );
+}
+
+function DetailPanel({ nodeId, node, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const codeHtml = HIGHLIGHTED[nodeId];
+  return h('div', { className: 'fixed top-4 right-4 bottom-4 w-[560px] z-30 bg-wt-surface border border-wt-border rounded-xl shadow-2xl flex flex-col overflow-hidden' },
+    h('button', {
+      onClick: onClose,
+      className: 'absolute top-3 right-3 z-10 w-7 h-7 rounded-md border border-wt-border bg-wt-raised text-wt-muted flex items-center justify-center text-lg hover:bg-wt-red hover:border-wt-red hover:text-white transition-colors'
+    }, '×'),
+    h('div', { className: 'flex-1 overflow-y-auto p-5' },
+      h('h2', { className: 'text-lg font-bold text-wt-fg mb-3 pr-9' }, node.title),
+      h('div', { className: 'dt-body' }, h('p', null, node.description)),
+      node.code && h('div', { className: 'dt-body' },
+        codeHtml
+          ? h('div', { dangerouslySetInnerHTML: { __html: codeHtml } })
+          : h('pre', { className: 'code-fallback' }, h('code', null, node.code))
+      ),
+      node.files?.length > 0 && h('div', { className: 'mt-4 pt-3 border-t border-wt-border' },
+        h('div', { className: 'text-[0.7rem] uppercase tracking-wider text-wt-muted font-semibold mb-1.5' }, 'Files'),
+        h('code', { className: 'text-sm text-wt-file font-mono leading-relaxed' },
+          node.files.map((f, i) => h('span', { key: i }, f, h('br')))
+        )
+      )
+    )
+  );
+}
+
+function ZoomControls({ zoomDisplayRef, onZoomIn, onZoomOut, onFit }) {
+  const btn = 'w-9 h-9 rounded-md border border-wt-border bg-wt-surface text-wt-muted flex items-center justify-center text-base hover:bg-wt-raised transition-colors';
+  return h('div', { className: 'fixed bottom-5 left-5 z-20 flex items-center gap-2' },
+    h('button', { onClick: onZoomOut, className: btn }, '−'),
+    h('span', { ref: zoomDisplayRef, className: 'text-xs text-wt-muted w-12 text-center font-mono' }, '100%'),
+    h('button', { onClick: onZoomIn, className: btn }, '+'),
+    h('button', { onClick: onFit, className: btn + ' text-xs px-2 w-auto', title: 'Fit to screen' }, 'Fit'),
+  );
+}
+
+function App() {
+  const [activeId, _setActiveId] = useState(null);
+  const [summaryCollapsed, setSummaryCollapsed] = useState(true);
+  const pz = usePanZoom();
+
+  const setActiveNode = useCallback((nodeId) => {
+    _setActiveId(nodeId);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = nodeId ? '0.4' : '1'; });
+    if (nodeId) {
+      const el = document.querySelector(`.mermaid-wrap .node[id*="${nodeId}"]`);
+      if (el) el.style.opacity = '1';
+    }
+  }, []);
+  const closeDetail = useCallback(() => {
+    _setActiveId(null);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = '1'; });
+  }, []);
+  useEffect(() => { setTimeout(pz.fitToScreen, 600); }, [pz.fitToScreen]);
+
+  return h(React.Fragment, null,
+    h('header', { className: 'fixed top-0 inset-x-0 z-10 px-6 py-3.5 bg-gradient-to-b from-wt-bg to-transparent pointer-events-none' },
+      h('h1', { className: 'text-base font-semibold text-wt-fg' }, 'NovaChat 消息推送全链路 — A 发送到 B 收到'),
+      h('p', { className: 'text-sm text-wt-muted mt-0.5' }, 'WS send_msg → 网关 → C++ 落库判重 → PushService 反向推送 → 跨网关转发 → B 端渲染 · 点击节点看代码')
+    ),
+    h(Summary, { collapsed: summaryCollapsed, onToggle: () => setSummaryCollapsed(c => !c) }),
+    h('div', { ref: pz.viewportRef, className: 'w-full h-screen overflow-hidden cursor-grab active:cursor-grabbing' },
+      h('div', { ref: pz.canvasRef, className: 'origin-top-left will-change-transform inline-block p-[80px_60px_60px]' },
+        h(MermaidDiagram, { onNodeClick: setActiveNode })
+      )
+    ),
+    h(ZoomControls, { zoomDisplayRef: pz.zoomDisplayRef, onZoomIn: pz.zoomIn, onZoomOut: pz.zoomOut, onFit: pz.fitToScreen }),
+    h('div', { className: 'fixed bottom-5 left-1/2 -translate-x-1/2 z-20 flex gap-4 px-4 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl' },
+      LEGEND.map(l => h('span', { key: l.label, className: 'flex items-center gap-1.5 text-xs text-wt-muted' },
+        h('span', { className: `w-2 h-2 rounded-full ${l.color}` }), l.label
+      ))
+    ),
+    activeId && NODES[activeId] && h(DetailPanel, { nodeId: activeId, node: NODES[activeId], onClose: closeDetail }),
+    h('div', { className: 'fixed bottom-5 right-5 z-20 text-xs text-wt-muted opacity-50' },
+      h('kbd', null, 'Scroll'), ' zoom · ', h('kbd', null, 'Drag'), ' pan · Click nodes'
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>

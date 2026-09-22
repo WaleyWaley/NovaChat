@@ -3,6 +3,9 @@
  *
  * handleAuth: 验 JWT → sessionStore 延迟创建 → connectionManager 注册 →
  *             置连接身份 → token 到期定时器 → Redis 在线登记 → auth_ok
+ * auth.ts负责两件事
+ * handleAuth:处理客户端的auth消息，完成WS认证
+ * handlePing:处理心跳
  */
 
 import { verifyAccessToken } from "../../auth/jwt.js";
@@ -113,3 +116,31 @@ export function handlePing(session: ClientSession, msg: ClientPingMessage): void
   }
   session.send(buildPong(msg.seq));
 }
+
+// 流程图
+// 客户端发送 WS auth 消息
+//         ↓
+// 提取 access_token
+//         ↓
+// verifyAccessToken(token)
+//         ↓
+// ├─ 失败 ──→ 根据错误类型返回 1002/1003/1004
+//         ↓
+// 验证成功，拿到 payload
+//         ↓
+// 处理 session (延迟创建 或 更新活跃时间)
+//         ↓
+// connectionManager.register(userId, username, socket)
+//         ↓
+// ├─ 失败 ──→ 返回 5002
+//         ↓
+// 设置 session.authenticated = true
+// session.userId = payload.user_id
+// session.username = payload.username
+// session.sessionId = payload.session_id
+//         ↓
+// session.armExpiryTimer(payload.exp)
+//         ↓
+// onlineRegistry.onUserOnline(userId, username)
+//         ↓
+// 返回 auth_ok 给客户端

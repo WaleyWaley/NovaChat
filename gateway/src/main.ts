@@ -78,10 +78,10 @@ async function createApp() {
   });
 
   // ---- 中间件钩子 ----
-  registerAuthHook(app);
-  registerRateLimitHook(app);
+  registerAuthHook(app);        // HTTP JWT 鉴权(WebSocket连接认证走auth.ts)
+  registerRateLimitHook(app);   // 限流
 
-  // ---- HTTP 路由 ----
+  // ---- HTTP REST 路由 ----   由 HTTP JWT Hook保护
   await app.register(healthRoutes);
   await app.register(messageRoutes);
   await app.register(pushRoutes);
@@ -93,6 +93,8 @@ async function createApp() {
     "/ws",
     { websocket: true },
     (socket: WebSocket, req: FastifyRequest) => {
+        
+      // 每个ws连接都new一个ClientSession
       const session = new ClientSession(socket);
 
       logger.info({ ip: req.ip }, "WebSocket connection established");

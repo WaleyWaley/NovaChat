@@ -22,10 +22,13 @@ export interface BrpcResponse<T = unknown> {
 
 /** HTTP 调用选项 */
 export interface CallOptions {
-  timeout?: number;      // 超时 ms (默认 5000)
-  headers?: Record<string, string>;
-  /** 注入到请求体的 user_id (网关鉴权后注入) */
-  injectUserId?: string | number;
+    timeout?: number;      // 超时 ms (默认 5000)]
+    
+    headers?: Record<string, string>;
+    
+  
+    /** 注入到请求体的 user_id (网关鉴权后注入) */
+    injectUserId?: string | number;
 }
 
 /**
@@ -61,11 +64,10 @@ export class BrpcClient {
 
   /**
    * 通用 RPC 调用
-   *
    * @param serviceName 完整的服务名，如 "nova.user.UserService"
    * @param methodName  方法名，如 "Register"
    * @param body        请求体 (JSON 对象)
-   * @param opts        可选参数
+   * @param opts        可选参数,默认空对象
    * @returns 响应 JSON
    */
   async call<TReq extends object, TResp = unknown>(
@@ -74,11 +76,14 @@ export class BrpcClient {
     body: TReq,
     opts: CallOptions = {}
   ): Promise<TResp> {
+
+    // 比如: http://user-service:8001/nova.user.UserService/Register
     const url = `${this.baseUrl}/${serviceName}/${methodName}`;
     const timeout = opts.timeout ?? this.defaultTimeout;
 
     // 注入 user_id (网关注入，后端信任)
-    if (opts.injectUserId !== undefined) {
+      if (opts.injectUserId !== undefined) {
+      // 因为body是TReq类型，TReq是泛型，可能没有user_id属性，所以这里用Record<string, unknown>来绕过类型检查
       (body as Record<string, unknown>).user_id = opts.injectUserId;
     }
 
@@ -90,9 +95,15 @@ export class BrpcClient {
     );
 
     try {
+        // =========================
+        // 发起HTTP请求
+        // =========================
+      // 浏览器/Node.js 里用来取消请求的标准 API
       const controller = new AbortController();
+      // 设置一个定时器：如果超过 timeout 毫秒，就执行 controller.abort() 取消请求
       const timeoutId = setTimeout(() => controller.abort(), timeout);
 
+        // 调用 C++ bRPC 服务的 HTTP 接口，发送 JSON 请求体
       const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -119,12 +130,18 @@ export class BrpcClient {
         );
       }
 
+        // 先拿到响应的原始文本字符串，而不是直接用 .json()。这是为了先用自定义的 parseBrpcJson 处理大整数精度问题。
       const data = parseBrpcJson(await response.text()) as TResp;
       logger.debug(
         { url, elapsed },
         "bRPC call ←"
       );
       return data;
+      /**
+       * 1. 已经是 BrpcCallError 说明是 HTTP 状态码不 ok 时抛出的，直接继续往上抛。
+       * 2. 请求被取消（超时） 如果 err 是 DOMException 且 name === "AbortError"，说明是 AbortController 超时取消的。包装成 BrpcCallError，状态码 408（请求超时）。
+       * 3. 其他网络错误 比如 DNS 失败、连接拒绝等。包装成 BrpcCallError，状态码 503（服务不可用）。
+       */
     } catch (err) {
       if (err instanceof BrpcCallError) throw err;
 
@@ -155,3 +172,26 @@ export class BrpcCallError extends Error {
     this.name = "BrpcCallError";
   }
 }
+
+
+// UserClient.register(req)
+//     ↓
+// BrpcClient.call("nova.user.UserService", "Register", req)
+//     ↓
+// 构造 URL: http://user-service:8001/nova.user.UserService/Register
+//     ↓
+// 设置超时定时器(AbortController)
+//     ↓
+// fetch POST 发送 JSON body
+//     ↓
+// 等待 C++ user - service 返回
+//     ↓
+// 收到响应文本
+//     ↓
+// parseBrpcJson() 处理大整数精度
+//     ↓
+// 断言为 TResp 类型
+//     ↓
+// 返回给 UserClient
+//     ↓
+// 返回给 user.ts 路由

@@ -12,7 +12,8 @@ import { logger } from "../utils/logger.js";
 // ---- 类型 (与 message.proto 对齐) ----
 
 export interface SendMessageReq {
-  from_peer: { type: number; id: string | number };
+  // 1=用户，2=群组用户； 用户 ID 或群组 ID
+  from_peer: { type: number; id: string | number }; // int64: base.ts 解析后为 string (精度安全)
   to_peer: { type: number; id: string | number };
   msg_type: number;
   text?: string;
@@ -146,4 +147,23 @@ export class MessageClient {
   }
 }
 
+// 导出单例，网关全局使用同一个 MessageClient 实例
 export const messageClient = new MessageClient();
+
+
+// 复用模式结构
+// messageClient.sendMessage(req)
+//         ↓
+// MessageClient.call("SendMessage", req)
+//         ↓
+// BrpcClient.call("nova.message.MessageService", "SendMessage", req)
+//         ↓
+// HTTP POST http://message-service:8002/nova.message.MessageService/SendMessage
+//         ↓
+// C++ message-service 处理
+//         ↓
+// 返回 JSON
+//         ↓
+// parseBrpcJson 解析
+//         ↓
+// 回到 messageClient

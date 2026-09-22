@@ -21,6 +21,7 @@ export async function handleSendMessage(
   session: ClientSession,
   msg: ClientSendMessage
 ): Promise<void> {
+    // 检查 session 已登录，同理用session.userId作为发送者ID，不信任客户端传的from_peer
   if (!session.userId) return;
 
   logger.info(
@@ -38,7 +39,8 @@ export async function handleSendMessage(
       idempotency_key: msg.payload.idempotency_key,
     });
 
-    // proto3 omits error_code=0 from JSON, so it may be undefined
+      // proto3 omits error_code=0 from JSON, so it may be undefined
+    // 如果后端返回错误，就直接回给客户端一个 rpc_result 错误响应，而不是抛异常
     if (result.error_code && result.error_code !== 0) {
       session.send(
         buildRpcResult(msg.seq, result.error_code, result.error_message || "", null)
@@ -46,7 +48,7 @@ export async function handleSendMessage(
       return;
     }
 
-    // 回确认给发送者 (消息已存储, message_id 已生成)
+    // 回确认给发送者 (消息已存储, message_id 已生成)，带上生成的message_id和状态
     const confirmMsg = buildRpcResult(msg.seq, 0, "", {
       message_id: result.message?.message_id,
       status: "sent",
@@ -134,3 +136,27 @@ export function handleTyping(session: ClientSession, msg: ClientTypingMessage): 
     { skipOffline: true }
   );
 }
+
+
+// 调用链路：
+// 客户端发送 WS: { type: "send_msg", seq: 1, payload: {...} }
+//         ↓
+// main.ts 解析并分发到 handleSendMessage(session, msg)
+//         ↓
+// 构造 SendMessageReq:
+//   from_peer.id = session.userId
+//   to_peer.id = msg.payload.peer_id
+//         ↓
+// messageClient.sendMessage(req)
+//         ↓
+// MessageClient.call("SendMessage", req)
+//         ↓
+// BrpcClient.call("nova.message.MessageService", "SendMessage", req)
+//         ↓
+// HTTP POST http://message-service:8002/nova.message.MessageService/SendMessage
+//         ↓
+// C++ message-service 存储消息
+//         ↓
+// 返回 SendMessageResp
+//         ↓
+// 网关回 WS: { type: "rpc_result", seq: 1, result: { message_id, status: "sent" } }

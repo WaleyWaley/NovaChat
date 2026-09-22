@@ -11,6 +11,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+// 
 import { userClient } from "../clients/user_client.js";
 import { sessionStore } from "../auth/session.js";
 import { logger } from "../utils/logger.js";
@@ -45,6 +46,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
       logger.info({ username }, "Register request");
 
+      // 通过 user-service 注册新用户（调用C++服务）
       const result = await userClient.register({
         username,
         password,
@@ -67,6 +69,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         username: user.username || username,
       });
 
+      // send给前端的响应中包含了注册结果和JWT信息
       return reply.send({
         ...result,
         access_token: jwtResult.access_token,

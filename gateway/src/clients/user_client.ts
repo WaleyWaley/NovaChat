@@ -3,6 +3,13 @@
  *
  * 每个方法对应 user.proto 中 UserService 的一个 RPC。
  * 入参/出参类型与 proto 定义对齐，Phase 1 全部发 HTTP JSON。
+ * 
+ * 网关的每个路由大都会调用 userClient 里的一个方法，而 userClient 里的每个方法又对应后端 C++ user-service 的 user.proto 中的一个 RPC 方法。
+ *
+ * 不过有两类操作是网关自己处理的，不会转发给 user-service：
+
+ * JWT 相关：注册/登录成功后的签发、刷新 token、登出后的 session 失效。
+ * 网关侧附加逻辑：比如改密码成功后，网关会主动把该用户的所有 session 清掉。
  */
 
 import { BrpcClient, type BrpcResponse, type CallOptions } from "./base.js";
@@ -159,17 +166,22 @@ export class UserClient {
     this.serviceName = getFullServiceName("user-service");
   }
 
+  // 泛型，TReq 是请求体类型限制为object类型，TResp 是响应体类型
   private call<TReq extends object, TResp>(
     method: string,
     body: TReq,
     opts?: CallOptions
   ): Promise<TResp> {
+    // 调用 BrpcClient 的 call 方法，传入 serviceName、method、body 和 opts
     return this.client.call<TReq, TResp>(this.serviceName, method, body, opts);
   }
 
   // ===== 认证 =====
 
+  // 注册不需要user_id，用户还没有获取。Omit<RegisterReq, "user_id"> 表示从 RegisterReq 类型中排除 user_id 属性
   async register(req: Omit<RegisterReq, "user_id">): Promise<RegisterResp> {
+    // req as RegisterReq 是类型断言，告诉 TypeScript 编译器 req 可以被视为 RegisterReq 类型
+    // 因为 call 方法要求 body 是 RegisterReq，但 register 的参数是 Omit<RegisterReq, "user_id">，类型不完全一致。所以用 as 强制转换一下。实际上运行时 user_id 本来也不需要传。
     return this.call<RegisterReq, RegisterResp>("Register", req as RegisterReq);
   }
 

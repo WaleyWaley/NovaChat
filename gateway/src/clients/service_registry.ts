@@ -40,6 +40,7 @@ const registry: Record<ServiceName, ServiceInfo> = {
  * @throws 如果服务未注册
  */
 export function getService(name: ServiceName): ServiceInfo {
+    // key value 调用
   const svc = registry[name];
   if (!svc) {
     throw new Error(`Service not found in registry: ${name}`);

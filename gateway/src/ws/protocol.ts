@@ -43,8 +43,8 @@ export interface ClientSendMessage {
     peer_type: number;  // PeerType: 1=user, 2=chat, 3=channel
     peer_id: number;    // 对端的id
     msg_type: number;   // MessageType
-    text?: string;
-    reply_to_msg_id?: number;
+    text?: string;      // 消息文本 (可选, 仅 msg_type=TEXT 时必填)
+    reply_to_msg_id?: number;   // 可选, 回复的消息ID 
     // Phase 3: 幂等键 (客户端生成, 网关原样透传给 message-service 去重)
     idempotency_key?: string;
     // Phase 3+: media, entities, etc.
@@ -85,10 +85,10 @@ export interface ClientRoomSignal {
   seq: number;
   payload: {
     action: "create" | "invite" | "join" | "leave" | "webrtc";
-    room_id?: string;
-    invite_user_ids?: (string | number)[];
+    room_id?: string;       // 房间ID, create/join/leave/webrtc 必须
+    invite_user_ids?: (string | number)[];  // 邀请的用户ID列表, invite 必须
     // webrtc 子类型
-    webrtc?: { signal_type: string; to_user_id: string | number; data?: Record<string, unknown> };
+    webrtc?: { signal_type: string; to_user_id: string | number; data?: Record<string, unknown> };  
   };
 }
 

@@ -27,6 +27,7 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: DialogsBody }>(
     "/api/messages/dialogs",
     async (request, reply) => {
+      // JWT 从中间件拿到request.userId
       const userId = request.userId;
       if (userId === undefined) {
         return reply.status(401).send({

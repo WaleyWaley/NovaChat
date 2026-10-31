@@ -187,6 +187,9 @@ services:
       # 限流
       - RATE_LIMIT_PER_USER=100
       - RATE_LIMIT_PER_IP=200
+      # 压测模式: 临时放开限流 (测完必须改回, 否则等于没有限流保护)
+      # - RATE_LIMIT_PER_USER=1000000
+      # - RATE_LIMIT_PER_IP=1000000
       # Session
       - SESSION_EXPIRES_IN=7d
       - SESSION_CLEANUP_INTERVAL=300000

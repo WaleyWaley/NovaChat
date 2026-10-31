@@ -19,7 +19,7 @@ import { logger } from "../utils/logger.js";
 
 /** 在线路由表 Value 的格式 (JSON) */
 export interface OnlineEntry {
-  gateway_addr: string;
+  gateway_addr: string;     // 比如"http://gateway-1:8080"
   last_heartbeat: number; // unix ms
 }
 
@@ -112,6 +112,7 @@ class GatewayRedis {
       last_heartbeat: Date.now(),
     };
 
+    // 
     try {
       await this.client.set(
         key,
@@ -162,6 +163,12 @@ class GatewayRedis {
     // 使用 pipeline 批量操作
     const pipeline = this.client.pipeline();
 
+    // 第一轮 pipeline：批量 GET 所有用户的在线状态
+    // 遍历结果：
+    // 如果 key 不存在 → 重新注册
+    // 如果 key 存在 → 更新 last_heartbeat 并重新 set
+    // 第二轮 pipeline：批量 SET 所有需要更新/注册的用户
+    // 这样只需要 2 次 Redis 往返，处理任意数量的用户。
     for (const userId of userIds) {
       const key = `user:online:${userId}`;
       pipeline.get(key);

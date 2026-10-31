@@ -11,7 +11,27 @@
  *
  * C++ message-service 通过查 Redis 路由表知道用户在哪个网关节点，
  * 然后通过 bRPC HTTP 调用该网关的 PushService 实现消息推送。
+ * 
+ * 为什么需要这个？
+ * 如果 NovaChat 部署多个网关实例，A 用户连在网关 1，B 用户连在网关 2。
+ * 当 C++ message-service 要给 A 用户推送消息时：
+ *  1.message-service 查 Redis：user:online:<A_user_id>
+ *  2.得到 gateway_addr = "网关1地址"
+ *  3.message-service 通过 HTTP 调用网关 1 的 PushService
+ *  4.网关 1 再把消息推给 A 用户的 WebSocket
+ * 所以 Redis 就是全局路由表，告诉后端服务：每个在线用户在哪个网关节点上。
  */
+
+// ┌─────────────────┐     ┌───────────────┐     ┌─────────────────┐
+// │  ConnectionManager │ → │  OnlineRegistry │ → │  GatewayRedis    │
+// │  (本地连接表)       │     │  (调度层)       │     │  (Redis 客户端)  │
+// └─────────────────┘     └───────────────┘     └─────────────────┘
+//                               ↓
+//                         Redis Server
+//                               ↓
+//                     key: user:online:<user_id>
+//                     value: { gateway_addr, last_heartbeat }
+
 
 import { connectionManager } from "./connection.js";
 import { gatewayRedis } from "../redis/client.js";

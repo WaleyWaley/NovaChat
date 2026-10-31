@@ -1,0 +1,20 @@
+{
+  "name": "topic01-connection-manager-lab",
+  "version": "0.1.0",
+  "description": "Lab: WebSocket connection manager with heartbeat",
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx src/MiniWebSocketServer.ts",
+    "dev:client": "tsx src/test-client.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

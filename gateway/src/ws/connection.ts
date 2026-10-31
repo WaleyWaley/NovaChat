@@ -86,6 +86,7 @@ export class ConnectionManager {
 
   getOnlineUserIds(): string[] { return [...this.byUserId.keys()]; }
 
+  // 发送消息
   sendToUser(userId: number | string, message: unknown): boolean {
     const key = String(userId);
     const entry = this.byUserId.get(key);
@@ -93,7 +94,7 @@ export class ConnectionManager {
     try { entry.ws.send(JSON.stringify(message)); return true; }
     catch (err) { logger.error({ userId, err }, "Failed to send"); return false; }
   }
-
+  // 批量发送
   sendToUsers(userIds: (number | string)[], message: unknown): [string[], string[]] {
     const delivered: string[] = []; const missed: string[] = [];
     for (const id of userIds) {
@@ -107,7 +108,9 @@ export class ConnectionManager {
     const uid = String(userId);
     const entry = this.byUserId.get(uid);
     if (!entry || entry.ws.readyState !== 1) return false;
+    // 发 kicked 消息给客户端
     try { entry.ws.send(JSON.stringify({ type: "kicked", payload: { reason, message } })); } catch {}
+    // 等100ms，让客户端有机会收到消息,关闭ws
     setTimeout(() => entry.ws.close(4001, message), 100);
     this.byUserId.delete(uid); this.bySocket.delete(entry.ws);
     logger.info({ userId: uid, reason }, "User kicked");
@@ -134,6 +137,7 @@ export class ConnectionManager {
     logger.info({ intervalSec }, "Heartbeat monitor started");
   }
 
+  // 网管关闭时调用，停止定时器
   stopHeartbeat(): void { if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; } }
 
   isDuplicatePush(pushId: number | string): boolean {
@@ -160,3 +164,44 @@ export class ConnectionManager {
 }
 
 export const connectionManager = new ConnectionManager();
+
+
+// 连接建立
+// 客户端连 /ws
+//     ↓
+// new ClientSession(socket)
+//     ↓
+// 发送 welcome
+//     ↓
+// 客户端发 auth
+//     ↓
+// handleAuth 验证成功
+//     ↓
+// connectionManager.register(userId, username, socket)
+//     ↓
+// byUserId.set(uid, entry)
+// bySocket.set(socket, uid)
+
+// 心跳
+// 客户端定期发 ping
+//     ↓
+// handlePing 调用 refreshHeartbeat(socket)
+//     ↓
+// lastHeartbeat = Date.now()
+//     ↓
+// startHeartbeat 定时器扫描
+//     ↓
+// (now - lastHeartbeat) > timeout?
+//     ├─ 是 → close(4002) 并移除
+//     └─ 否 → 保留
+
+// 推送
+// 后端有新消息要推给用户
+//     ↓
+// connectionManager.sendToUser(userId, message)
+//     ↓
+// byUserId.get(userId) 找到 entry
+//     ↓
+// ws.readyState === 1?
+//     ├─ 是 → ws.send(JSON.stringify(message))
+//     └─ 否 → 返回 false，调用方处理离线逻辑

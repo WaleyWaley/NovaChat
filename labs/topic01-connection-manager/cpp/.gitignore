@@ -1,0 +1,9 @@
+# build artifacts
+build/
+*.exe
+*.o
+*.obj
+compile_commands.json
+
+# 第三方单头文件库 (用 fetch_deps.ps1 下载)
+third_party/
